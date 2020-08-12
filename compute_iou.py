@@ -6,7 +6,8 @@ from os.path import join
 
 
 def fast_hist(a, b, n):
-    k = (a >= 0) & (a < n)
+    # k = (a >= 0) & (a < n)
+    k = (a >= 0) & (a < n) & (b >= 0) & (b < n)
     return np.bincount(n * a[k].astype(int) + b[k], minlength=n ** 2).reshape(n, n)
 
 
@@ -42,6 +43,7 @@ def compute_mIoU(gt_dir, pred_dir, devkit_dir=''):
 
     for ind in range(len(gt_imgs)):
         pred = np.array(Image.open(pred_imgs[ind]))
+        pred = np.vectorize(lambda x: 255 if x == 20 else x)(pred)
         label = np.array(Image.open(gt_imgs[ind]))
         label = label_mapping(label, mapping)
         if len(label.flatten()) != len(pred.flatten()):

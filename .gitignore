@@ -134,3 +134,9 @@ dmypy.json
 # AdaptSeg
 data/
 snapshots/
+
+# AsymTri
+snapshots
+result
+result_
+wandb

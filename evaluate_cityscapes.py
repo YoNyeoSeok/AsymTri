@@ -132,62 +132,78 @@ def main():
             if index % 100 == 0:
                 print('%d processd' % index)
             image, _, name = batch
+            assert len(image) == 1, "Should have 1 batch size"
             if args.model == 'DeeplabTri':
-                output1, output2, output3 = model(image.cuda(gpu0))
-                output1 = interp(output1).cpu().data[0].numpy()
-                output2 = interp(output2).cpu().data[0].numpy()
+                output1, output2, _ = model(image.cuda(gpu0))
+                output1 = interp(output1)[0]
+                output2 = interp(output2)[0]
             elif args.model == 'DeeplabDiff':
                 output1, output2 = model(image.cuda(gpu0))
-                output1 = interp(output1).cpu().data[0].numpy()
-                output2 = interp(output2).cpu().data[0].numpy()
+                output1 = interp(output1)[0]
+                output2 = interp(output2)[0]
             elif args.model == 'DeeplabVGG' or args.model == 'Oracle':
                 output = model(image.cuda(gpu0))
-                output = interp(output).cpu().data[0].numpy()
+                output = interp(output)[0]
+                assert False, "Modified to eval two classifier"
 
-            output1 = output1.transpose(1, 2, 0)
-            output2 = output2.transpose(1, 2, 0)
-            argmax_output1 = np.asarray(
-                np.argmax(output1, axis=2), dtype=np.uint8)
-            argmax_output2 = np.asarray(
-                np.argmax(output2, axis=2), dtype=np.uint8)
-            max_output1 = np.asarray(np.max(output1, axis=2))
-            max_output2 = np.asarray(np.max(output2, axis=2))
-            per_class_max_output1 = list(map(lambda c: max_output1.flatten()[
-                                         argmax_output1.flatten() == c], range(19)))
-            per_class_max_output2 = list(map(lambda c: max_output2.flatten()[
-                                         argmax_output2.flatten() == c], range(19)))
+            # outptu1 = (C x H x W)
+            # output2 = (C x H x W)
+            max_output1, argmax_output1 = output1.max(0)
+            max_output2, argmax_output2 = output2.max(0)
+            # max_output1 = np.asarray(np.max(output1, axis=2))
+            # max_output2 = np.asarray(np.max(output2, axis=2))
+            per_class_max_output1 = list(map(lambda c: max_output1.masked_select(argmax_output1 == c), range(19)))
+            per_class_max_output2 = list(map(lambda c: max_output2.masked_select(argmax_output1 == c), range(19)))
             # print(list(map(lambda c: len(per_class_max_output1[c]), range(19))))
 
-            threshold_idx_output1 = np.linspace(0, len(max_output1.flatten()), 11)[
-                :-1].astype(np.int)
-            threshold_idx_output2 = np.linspace(0, len(max_output2.flatten()), 11)[
-                :-1].astype(np.int)
-            per_class_threshold_idx_output1 = list(map(lambda c: np.linspace(
-                0, len(per_class_max_output1[c]), 11)[:-1].astype(np.int), range(19)))
-            per_class_threshold_idx_output2 = list(map(lambda c: np.linspace(
-                0, len(per_class_max_output2[c]), 11)[:-1].astype(np.int), range(19)))
+            threshold_idx_output1 = torch.linspace(
+                0, len(max_output1.flatten()), 11, device=gpu0)[:-1].long()
+            threshold_idx_output2 = torch.linspace(
+                0, len(max_output2.flatten()), 11, device=gpu0)[:-1].long()
+            per_class_threshold_idx_output1 = list(map(lambda c: torch.linspace(
+                0, len(per_class_max_output1[c]), 11, device=gpu0)[:-1].long(), range(19)))
+            per_class_threshold_idx_output2 = list(map(lambda c: torch.linspace(
+                0, len(per_class_max_output2[c]), 11, device=gpu0)[:-1].long(), range(19)))
             # print(np.array(per_class_threshold_idx_output1))
 
-            threshold_output1 = np.sort(max_output1.flatten())[
-                threshold_idx_output1]
-            threshold_output2 = np.sort(max_output2.flatten())[
-                threshold_idx_output2]
-            per_class_threshold_output1 = list(map(lambda c: [None]*10 if per_class_max_output1[c].size == 0 else np.sort(
-                per_class_max_output1[c])[per_class_threshold_idx_output1[c]], np.arange(19)))
-            per_class_threshold_output2 = list(map(lambda c: [None]*10 if per_class_max_output2[c].size == 0 else np.sort(
-                per_class_max_output2[c])[per_class_threshold_idx_output2[c]], np.arange(19)))
+            threshold_output1 = max_output1.flatten().sort()[0][threshold_idx_output1]
+            threshold_output2 = max_output2.flatten().sort()[0][threshold_idx_output2]
+            per_class_threshold_output1 = list(map(lambda c:
+                    [None]*10 if per_class_max_output1[c].size != 0 else 
+                    per_class_max_output1[c].sort()[0][per_class_threshold_idx_output1[c]].cpu().numpy(),
+                range(19)))
+            per_class_threshold_output2 = list(map(lambda c:
+                    [None]*10 if per_class_max_output2[c].size != 0 else
+                    per_class_max_output2[c].sort()[0][per_class_threshold_idx_output2[c]].cpu().numpy(),
+                range(19)))
             # print(np.array(per_class_threshold_output1))
 
+            max_output1 = max_output1.cpu().numpy()
+            max_output2 = max_output2.cpu().numpy()
+            argmax_output1 = argmax_output1.cpu().numpy()
+            argmax_output2 = argmax_output2.cpu().numpy()
+            threshold_output1 = threshold_output1.cpu().numpy()
+            threshold_output2 = threshold_output2.cpu().numpy()
+            # per_class_threshold_output1 = [o.cpu().numpy() for o in per_class_threshold_output1]
+            # per_class_threshold_output2 = [o.cpu().numpy() for o in per_class_threshold_output2]
             name = name[0].split('/')[-1]
             for idx, p in enumerate(range(0, 100, 10)):
                 top_p = '{0:02d}_{1:d}'.format(p, 100)
+
+                top_p_filter = np.vectorize(
+                    lambda am, m, t: am if m >= t else IGNORE_LABEL)
                 and_filter = np.vectorize(
                     lambda o1, o2: o1 if o1 == o2 else IGNORE_LABEL)
                 or_filter = np.vectorize(lambda o1, o2: o1 if o1 == o2 else (
                     o2 if o1 == IGNORE_LABEL else (o1 if o2 == IGNORE_LABEL else IGNORE_LABEL)))
 
-                top_p_filter = np.vectorize(
-                    lambda am, m, t: am if m >= t else IGNORE_LABEL)
+                t1 = np.array(per_class_threshold_output1)[:, idx]
+                t2 = np.array(per_class_threshold_output2)[:, idx]
+                per_class_top_p_filter1 = np.vectorize(lambda am, m: am if (
+                    t1[am] is not None) and (m >= t1[am]) else IGNORE_LABEL)
+                per_class_top_p_filter2 = np.vectorize(lambda am, m: am if (
+                    t2[am] is not None) and (m >= t2[am]) else IGNORE_LABEL)
+
                 filter_output1 = top_p_filter(
                     argmax_output1, max_output1, threshold_output1[idx]).astype(np.uint8)
                 filter_output2 = top_p_filter(
@@ -197,12 +213,6 @@ def main():
                 filter_output_or = or_filter(
                     filter_output1, filter_output2).astype(np.uint8)
 
-                t1 = np.array(per_class_threshold_output1)[:, idx]
-                t2 = np.array(per_class_threshold_output2)[:, idx]
-                per_class_top_p_filter1 = np.vectorize(lambda am, m: am if (
-                    t1[am] is not None) and (m >= t1[am]) else IGNORE_LABEL)
-                per_class_top_p_filter2 = np.vectorize(lambda am, m: am if (
-                    t2[am] is not None) and (m >= t2[am]) else IGNORE_LABEL)
                 per_class_filter_output1 = per_class_top_p_filter1(
                     argmax_output1, max_output1).astype(np.uint8)
                 per_class_filter_output2 = per_class_top_p_filter2(

@@ -7,6 +7,8 @@ from model.deeplab import (
     affine_par, conv3x3, BasicBlock, Bottleneck)
 from model.deeplab_multi import Classifier_Module
 
+from matplotlib import pyplot as plt
+
 
 class ResNetDiff(nn.Module):
     def __init__(self, block, layers, num_classes):
@@ -105,6 +107,57 @@ class ResNetDiff(nn.Module):
                     # kernel select, orthogonal channel
                     # diff += (w1 * w2).sum([1]).norm(norm).pow(norm)
         return diff
+
+    def weight_viz(self, suptitle, save_path):
+        save_name_list = []
+        for cn, (m1, m2) in enumerate(zip(self.layer5.conv2d_list, self.layer6.conv2d_list)):
+            for (n1, w1), (n2, w2) in zip(m1.named_parameters(), m2.named_parameters()):
+                assert n1 == n2, "classifier not match"
+                if 'weight' in n1:
+                    B, C, K1, K2 = w1.shape
+                    w1w2 = torch.cat([w1.reshape(B, -1), w2.reshape(B, -1)], 1)
+                    w1w2r = w1w2.abs().detach().cpu().numpy().max(1)
+
+                    vec = w1 * w2
+                    conflict = vec.abs()  # -1, C, K1, K2
+                    c_conflict = vec.sum([1], keepdim=True).abs() # -1, 1, K1, K2
+                    k_conflict = vec.sum([2, 3], keepdim=True).abs()  # -1, C, 1, 1
+                    ck_conflict = vec.sum([1, 2, 3], keepdim=True).abs()  # -1, 1, 1, 1
+                    conflicts = torch.cat([torch.cat([conflict, c_conflict], axis=1).reshape(-1, C+1, K1*K2),
+                                        torch.cat([k_conflict, ck_conflict], axis=1).reshape(-1, C+1, 1),
+                                        ], axis=2)   # -1, C+1, K1*K2+1
+
+                    w1 = w1.detach().cpu().numpy()
+                    w2 = w2.detach().cpu().numpy()
+                    
+                    cf = conflicts.detach().cpu().numpy()
+                    cfr = conflicts.abs().detach().cpu().numpy().reshape(B, -1).max(1)
+
+                    # fig, axs = plt.subplots(3*10, 1, sharex=True, sharey=True, figsize=(C//10, K1*K2*3*10//10))
+                    # for k in range(10):
+                    #     axs[k*3+0].imshow(w1[k].reshape(C, K1*K2).T, 'RdGy', vmin=-w1w2r[k], vmax=w1w2r[k])
+                    #     axs[k*3+0].set_title('layer5_{}{}'.format(n1, k))
+                    #     axs[k*3+1].imshow(w2[k].reshape(C, K1*K2).T, 'RdGy', vmin=-w1w2r[k], vmax=w1w2r[k])
+                    #     axs[k*3+1].set_title('layer6_{}{}'.format(n2, k))
+                    #     axs[k*3+2].imshow(cf[k].T, 'RdGy', vmin=-cfr[k], vmax=cfr[k])
+                    #     axs[k*3+2].set_title('confilcts_{}'.format(k))
+                    # plt.suptitle('{}_{}'.format(m1, suptitle))
+                    # plt.savefig('{}/conv{}_{}.jpg'.format(save_path, cn, n1))
+                    # plt.close()
+
+                    fig, axs = plt.subplots(3, 10, sharex=True, sharey=True, figsize=(K1*K2*10//3, K1*K2*3//3))
+                    for k in range(10):
+                        axs[0, k].imshow(w1[k].reshape(C, K1*K2)[-K1*K2+1:].T, 'RdGy', vmin=-w1w2r[k], vmax=w1w2r[k])
+                        axs[0, k].set_title('layer5_{}{}'.format(n1, k))
+                        axs[1, k].imshow(w2[k].reshape(C, K1*K2)[-K1*K2+1:].T, 'RdGy', vmin=-w1w2r[k], vmax=w1w2r[k])
+                        axs[1, k].set_title('layer6_{}{}'.format(n2, k))
+                        axs[2, k].imshow(cf[k][-K1*K2:].T, 'RdGy', vmin=-cfr[k], vmax=cfr[k])
+                        axs[2, k].set_title('confilcts_{}{}'.format(n1, k))
+                    plt.suptitle('{}_{}'.format(m1, suptitle))
+                    plt.savefig('{}/conv{}_{}_sample.jpg'.format(save_path, cn, n1))
+                    plt.close()
+                    save_name_list.append('conv{}_{}_sample.jpg'.format(cn, n1))
+        return save_name_list
 
     def get_1x_lr_params_NOscale(self):
         """

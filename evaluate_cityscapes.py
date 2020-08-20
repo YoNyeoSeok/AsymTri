@@ -13,6 +13,7 @@ from torch.utils import data, model_zoo
 from model.deeplab import Res_Deeplab
 from model.deeplab_multi import DeeplabMulti
 from model.deeplab_tri import DeeplabTri
+from model.deeplab_diff import DeeplabDiff
 from model.deeplab_vgg import DeeplabVGG
 from dataset.cityscapes_dataset import cityscapesDataSet
 from collections import OrderedDict
@@ -60,8 +61,8 @@ def get_arguments():
       A list of parsed arguments.
     """
     parser = argparse.ArgumentParser(description="DeepLab-ResNet Network")
-    parser.add_argument("--model", type=str, default=MODEL,
-                        help="Model Choice (DeeplabTri/DeeplabMulti/DeeplabVGG/Oracle).")
+    parser.add_argument("--model", type=str, default=MODEL, required=True,
+                        help="Model Choice (DeeplabTri/DeeplabMulti/DeeplabDiff/DeeplabVGG/Oracle).")
     parser.add_argument("--data-dir", type=str, default=DATA_DIRECTORY,
                         help="Path to the directory containing the Cityscapes dataset.")
     parser.add_argument("--data-list", type=str, default=DATA_LIST_PATH,
@@ -95,6 +96,8 @@ def main():
         model = DeeplabMulti(num_classes=args.num_classes)
     elif args.model == 'DeeplabTri':
         model = DeeplabTri(num_classes=args.num_classes)
+    elif args.model == 'DeeplabDiff':
+        model = DeeplabDiff(num_classes=args.num_classes)
     elif args.model == 'Oracle':
         model = Res_Deeplab(num_classes=args.num_classes)
         if args.restore_from == RESTORE_FROM:
@@ -131,6 +134,10 @@ def main():
             image, _, name = batch
             if args.model == 'DeeplabTri':
                 output1, output2, output3 = model(image.cuda(gpu0))
+                output1 = interp(output1).cpu().data[0].numpy()
+                output2 = interp(output2).cpu().data[0].numpy()
+            elif args.model == 'DeeplabDiff':
+                output1, output2 = model(image.cuda(gpu0))
                 output1 = interp(output1).cpu().data[0].numpy()
                 output2 = interp(output2).cpu().data[0].numpy()
             elif args.model == 'DeeplabVGG' or args.model == 'Oracle':

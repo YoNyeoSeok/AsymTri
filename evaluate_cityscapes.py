@@ -3,10 +3,12 @@ import scipy
 from scipy import ndimage
 import numpy as np
 import sys
+from tqdm import tqdm
 # from packaging import version
 
 import torch
 from torch.autograd import Variable
+import torchvision
 import torchvision.models as models
 import torch.nn.functional as F
 from torch.utils import data, model_zoo
@@ -45,13 +47,6 @@ zero_pad = 256 * 3 - len(palette)
 for i in range(zero_pad):
     palette.append(0)
 
-
-def colorize_mask(mask):
-    # mask: numpy array of the mask
-    new_mask = Image.fromarray(mask.astype(np.uint8)).convert('P')
-    new_mask.putpalette(palette)
-
-    return new_mask
 
 
 def get_arguments():
@@ -128,9 +123,7 @@ def main():
         size=(1024, 2048), mode='bilinear', align_corners=True)
 
     with torch.no_grad():
-        for index, batch in enumerate(testloader):
-            if index % 100 == 0:
-                print('%d processd' % index)
+        for index, batch in tqdm(enumerate(testloader), total=len(testloader)):
             image, _, name = batch
             assert len(image) == 1, "Should have 1 batch size"
             if args.model == 'DeeplabTri':
@@ -157,76 +150,62 @@ def main():
             # print(list(map(lambda c: len(per_class_max_output1[c]), range(19))))
 
             threshold_idx_output1 = torch.linspace(
-                0, len(max_output1.flatten()), 11, device=gpu0)[:-1].long()
+                0, len(max_output1.flatten()), 11, device=gpu0)[:-1].round().long()
             threshold_idx_output2 = torch.linspace(
-                0, len(max_output2.flatten()), 11, device=gpu0)[:-1].long()
+                0, len(max_output2.flatten()), 11, device=gpu0)[:-1].round().long()
             per_class_threshold_idx_output1 = list(map(lambda c: torch.linspace(
-                0, len(per_class_max_output1[c]), 11, device=gpu0)[:-1].long(), range(19)))
+                0, len(per_class_max_output1[c]), 11, device=gpu0)[:-1].round().long(), range(19)))
             per_class_threshold_idx_output2 = list(map(lambda c: torch.linspace(
-                0, len(per_class_max_output2[c]), 11, device=gpu0)[:-1].long(), range(19)))
+                0, len(per_class_max_output2[c]), 11, device=gpu0)[:-1].round().long(), range(19)))
             # print(np.array(per_class_threshold_idx_output1))
 
             threshold_output1 = max_output1.flatten().sort()[0][threshold_idx_output1]
             threshold_output2 = max_output2.flatten().sort()[0][threshold_idx_output2]
-            per_class_threshold_output1 = list(map(lambda c:
-                    [None]*10 if per_class_max_output1[c].size != 0 else 
-                    per_class_max_output1[c].sort()[0][per_class_threshold_idx_output1[c]].cpu().numpy(),
-                range(19)))
-            per_class_threshold_output2 = list(map(lambda c:
-                    [None]*10 if per_class_max_output2[c].size != 0 else
-                    per_class_max_output2[c].sort()[0][per_class_threshold_idx_output2[c]].cpu().numpy(),
-                range(19)))
+            per_class_threshold_output1 = torch.stack(list(map(lambda c:
+                    torch.ones(10, device=gpu0) if len(per_class_max_output1[c]) == 0 else 
+                    per_class_max_output1[c].sort()[0][per_class_threshold_idx_output1[c]],
+                range(19))))
+            per_class_threshold_output2 = torch.stack(list(map(lambda c:
+                    torch.ones(10, device=gpu0) if len(per_class_max_output2[c]) == 0 else
+                    per_class_max_output2[c].sort()[0][per_class_threshold_idx_output2[c]],
+                range(19))))
             # print(np.array(per_class_threshold_output1))
 
-            max_output1 = max_output1.cpu().numpy()
-            max_output2 = max_output2.cpu().numpy()
-            argmax_output1 = argmax_output1.cpu().numpy()
-            argmax_output2 = argmax_output2.cpu().numpy()
-            threshold_output1 = threshold_output1.cpu().numpy()
-            threshold_output2 = threshold_output2.cpu().numpy()
-            # per_class_threshold_output1 = [o.cpu().numpy() for o in per_class_threshold_output1]
-            # per_class_threshold_output2 = [o.cpu().numpy() for o in per_class_threshold_output2]
             name = name[0].split('/')[-1]
             for idx, p in enumerate(range(0, 100, 10)):
                 top_p = '{0:02d}_{1:d}'.format(p, 100)
 
-                top_p_filter = np.vectorize(
-                    lambda am, m, t: am if m >= t else IGNORE_LABEL)
-                and_filter = np.vectorize(
-                    lambda o1, o2: o1 if o1 == o2 else IGNORE_LABEL)
-                or_filter = np.vectorize(lambda o1, o2: o1 if o1 == o2 else (
-                    o2 if o1 == IGNORE_LABEL else (o1 if o2 == IGNORE_LABEL else IGNORE_LABEL)))
-
-                t1 = np.array(per_class_threshold_output1)[:, idx]
-                t2 = np.array(per_class_threshold_output2)[:, idx]
-                per_class_top_p_filter1 = np.vectorize(lambda am, m: am if (
-                    t1[am] is not None) and (m >= t1[am]) else IGNORE_LABEL)
-                per_class_top_p_filter2 = np.vectorize(lambda am, m: am if (
-                    t2[am] is not None) and (m >= t2[am]) else IGNORE_LABEL)
-
-                filter_output1 = top_p_filter(
-                    argmax_output1, max_output1, threshold_output1[idx]).astype(np.uint8)
-                filter_output2 = top_p_filter(
-                    argmax_output2, max_output2, threshold_output2[idx]).astype(np.uint8)
-                filter_output_and = and_filter(
-                    filter_output1, filter_output2).astype(np.uint8)
-                filter_output_or = or_filter(
-                    filter_output1, filter_output2).astype(np.uint8)
-
-                per_class_filter_output1 = per_class_top_p_filter1(
-                    argmax_output1, max_output1).astype(np.uint8)
-                per_class_filter_output2 = per_class_top_p_filter2(
-                    argmax_output2, max_output2).astype(np.uint8)
-                per_class_filter_output_and = and_filter(
-                    per_class_filter_output1, per_class_filter_output2).astype(np.uint8)
-                per_class_filter_output_or = or_filter(
-                    per_class_filter_output1, per_class_filter_output2).astype(np.uint8)
-                # output3 = np.vectorize(lambda s, o: o if s else IGNORE_LABEL)(output1==output2, output1).astype(np.uint8)
+                filter_output1 = argmax_output1.masked_fill(
+                    mask=max_output1 < threshold_output1[idx], value=IGNORE_LABEL)
+                filter_output2 = argmax_output2.masked_fill(
+                    mask=max_output2 < threshold_output2[idx], value=IGNORE_LABEL)
+                filter_output_and = filter_output1.masked_fill(
+                    mask=filter_output1 != filter_output2, value=IGNORE_LABEL)
+                filter_output_or = filter_output_and.flatten().masked_scatter(
+                    mask=filter_output1.flatten()==255,
+                    source=filter_output2.flatten()[filter_output1.flatten()==255]).masked_scatter(
+                        mask=filter_output2.flatten()==255,
+                        source=filter_output1.flatten()[filter_output2.flatten()==255]).reshape(
+                            *filter_output_and.shape)
+                        
+                per_class_filter_output1 = argmax_output1.masked_fill(
+                    mask=max_output1 < per_class_threshold_output1[argmax_output1, idx], value=IGNORE_LABEL)
+                per_class_filter_output2 = argmax_output2.masked_fill(
+                    mask=max_output2 < per_class_threshold_output2[argmax_output2, idx], value=IGNORE_LABEL)
+                per_class_filter_output_and = per_class_filter_output1.masked_fill(
+                    mask=per_class_filter_output1 != per_class_filter_output2, value=IGNORE_LABEL)
+                per_class_filter_output_or = per_class_filter_output_and.flatten().masked_scatter(
+                    mask=per_class_filter_output1.flatten()==255,
+                    source=per_class_filter_output2.flatten()[per_class_filter_output1.flatten()==255]).masked_scatter(
+                        mask=per_class_filter_output2.flatten()==255,
+                        source=per_class_filter_output1.flatten()[per_class_filter_output2.flatten()==255]).reshape(
+                            *per_class_filter_output_and.shape)
 
                 # print('%s/%s_pred_%s \t %s' % (args.save, top_p, name, threshold_output1[idx]))
                 for pred_, output_ in zip(['1', '2', 'and', 'or'], [filter_output1, filter_output2, filter_output_and, filter_output_or]):
-                    output_col = colorize_mask(output_)
-                    output = Image.fromarray(output_)
+                    output = torchvision.transforms.functional.to_pil_image(output_.int().cpu())
+                    output_col = output.copy()
+                    output_col.convert('P').putpalette(palette)
 
                     if not os.path.exists('%s/%s_pred_%s' % (args.save, top_p, pred_)):
                         os.makedirs('%s/%s_pred_%s' %
@@ -238,8 +217,9 @@ def main():
 
                 # print('%s/class_%s_pred_%s \t %s' % (args.save, top_p, name, threshold_output1[idx]))
                 for pred_, output_ in zip(['1', '2', 'and', 'or'], [per_class_filter_output1, per_class_filter_output2, per_class_filter_output_and, per_class_filter_output_or]):
-                    output_col = colorize_mask(output_)
-                    output = Image.fromarray(output_)
+                    output = torchvision.transforms.functional.to_pil_image(output_.int().cpu())
+                    output_col = output.copy()
+                    output_col.convert('P').putpalette(palette)
 
                     if not os.path.exists('%s/class_%s_pred_%s' % (args.save, top_p, pred_)):
                         os.makedirs('%s/class_%s_pred_%s' %

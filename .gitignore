@@ -140,3 +140,6 @@ snapshots
 result
 result_
 wandb
+
+# diff
+snapshots_diff

@@ -3,8 +3,7 @@ import math
 import torch.utils.model_zoo as model_zoo
 import torch
 import numpy as np
-from model.deeplab import (
-    affine_par, conv3x3, BasicBlock, Bottleneck)
+from model.deeplab import affine_par, conv3x3, BasicBlock, Bottleneck
 from model.deeplab_multi import Classifier_Module
 
 from matplotlib import pyplot as plt

@@ -131,6 +131,9 @@ dmypy.json
 # vscode
 .vscode/
 
+# wandb
+wandb
+
 # AdaptSeg
 data
 snapshots/

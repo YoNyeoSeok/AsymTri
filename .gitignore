@@ -133,12 +133,7 @@ dmypy.json
 
 # AdaptSeg
 data
-snapshots*
-
-# AsymTri
-result
-result_
-wandb
+snapshots/
 
 # diff
 snapshots_diff

@@ -156,6 +156,8 @@ class ResNetDualCo(nn.Module):
         b.append(self.layer2)
         b.append(self.layer3)
         b.append(self.layer4)
+        b.append(self.layer5)
+        b.append(self.layer6)
 
         for i in range(len(b)):
             for j in b[i].modules():
@@ -171,8 +173,8 @@ class ResNetDualCo(nn.Module):
         which does the classification of pixel into classes
         """
         b = []
-        b.append(self.layer5.parameters())
-        b.append(self.layer6.parameters())
+        b.append(self.layer7.parameters())
+        b.append(self.layer8.parameters())
 
         for j in range(len(b)):
             for i in b[j]:

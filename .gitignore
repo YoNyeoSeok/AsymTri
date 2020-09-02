@@ -141,6 +141,7 @@ snapshots/
 # diff
 snapshots_diff
 result
+psLabel
 
 # dualco
 snapshots_dualco

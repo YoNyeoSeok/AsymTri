@@ -14,7 +14,6 @@ import torch.nn.functional as F
 from torch.utils import data, model_zoo
 from model.deeplab import Res_Deeplab
 from model.deeplab_multi import DeeplabMulti
-from model.deeplab_tri import DeeplabTri
 from model.deeplab_diff import DeeplabDiff
 from model.deeplab_vgg import DeeplabVGG
 from dataset.cityscapes_dataset import cityscapesDataSet
@@ -38,7 +37,7 @@ RESTORE_FROM_VGG = 'http://vllab.ucmerced.edu/ytsai/CVPR18/GTA2Cityscapes_vgg-ac
 RESTORE_FROM_ORC = 'http://vllab1.ucmerced.edu/~whung/adaptSeg/cityscapes_oracle-b7b9934.pth'
 SET = 'val'
 
-MODEL = 'DeeplabTri'
+MODEL = 'DeeplabDiff'
 
 palette = [128, 64, 128, 244, 35, 232, 70, 70, 70, 102, 102, 156, 190, 153, 153, 153, 153, 153, 250, 170, 30,
            220, 220, 0, 107, 142, 35, 152, 251, 152, 70, 130, 180, 220, 20, 60, 255, 0, 0, 0, 0, 142, 0, 0, 70,
@@ -57,7 +56,7 @@ def get_arguments():
     """
     parser = argparse.ArgumentParser(description="DeepLab-ResNet Network")
     parser.add_argument("--model", type=str, default=MODEL, required=True,
-                        help="Model Choice (DeeplabTri/DeeplabMulti/DeeplabDiff/DeeplabVGG/Oracle).")
+                        help="Model Choice (DeeplabMulti/DeeplabDiff/DeeplabVGG/Oracle).")
     parser.add_argument("--data-dir", type=str, default=DATA_DIRECTORY,
                         help="Path to the directory containing the Cityscapes dataset.")
     parser.add_argument("--data-list", type=str, default=DATA_LIST_PATH,
@@ -89,8 +88,6 @@ def main():
 
     if args.model == 'DeeplabMulti':
         model = DeeplabMulti(num_classes=args.num_classes)
-    elif args.model == 'DeeplabTri':
-        model = DeeplabTri(num_classes=args.num_classes)
     elif args.model == 'DeeplabDiff':
         model = DeeplabDiff(num_classes=args.num_classes)
     elif args.model == 'Oracle':
@@ -126,11 +123,7 @@ def main():
         for index, batch in tqdm(enumerate(testloader), total=len(testloader)):
             image, _, name = batch
             assert len(image) == 1, "Should have 1 batch size"
-            if args.model == 'DeeplabTri':
-                output1, output2, _ = model(image.cuda(gpu0))
-                output1 = interp(output1)[0]
-                output2 = interp(output2)[0]
-            elif args.model == 'DeeplabDiff':
+            if args.model == 'DeeplabDiff':
                 output1, output2 = model(image.cuda(gpu0))
                 output1 = interp(output1)[0]
                 output2 = interp(output2)[0]

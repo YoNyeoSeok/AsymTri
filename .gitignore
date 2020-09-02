@@ -135,11 +135,12 @@ dmypy.json
 wandb
 
 # AdaptSeg
-data/
+data
 snapshots/
 
 # diff
 snapshots_diff
+result
 
 # dualco
 snapshots_dualco

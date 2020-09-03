@@ -206,15 +206,28 @@ def main():
                     *argmax_output1234[:2],
                     *list(map(lambda thr: thr[idx], threshold_output1234[:2])),
                 )
+                filter_output_3_4_and_or = filter_two_output(
+                    *max_output1234[2:],
+                    *argmax_output1234[2:],
+                    *list(map(lambda thr: thr[idx], threshold_output1234[2:])),
+                )
 
                 per_class_filter_output_1_2_and_or = per_class_filter_two_output(
                     *max_output1234[:2],
                     *argmax_output1234[:2],
                     *list(map(lambda argmax_output, thr: thr[argmax_output, idx], argmax_output1234[:2], per_class_threshold_output1234[:2]))
                 )
+                per_class_filter_output_3_4_and_or = per_class_filter_two_output(
+                    *max_output1234[2:],
+                    *argmax_output1234[2:],
+                    *list(map(lambda argmax_output, thr: thr[argmax_output, idx], argmax_output1234[2:], per_class_threshold_output1234[2:]))
+                )
 
                 # print('%s/%s_pred_%s \t %s' % (args.save, top_p, name, threshold_output1[idx]))
-                for pred_, output_ in zip(['1', '2', 'and', 'or'], filter_output_1_2_and_or):
+                for pred_, output_ in zip(
+                    ['1', '2', '12and', '12or', '3', '4', '34and', '34or'],
+                        list(filter_output_1_2_and_or)+list(filter_output_3_4_and_or)):
+
                     output = torchvision.transforms.functional.to_pil_image(
                         output_.int().cpu())
                     output_col = output.copy().convert('P')
@@ -229,7 +242,10 @@ def main():
                                     (args.save, top_p, pred_, name.split('.')[0]))
 
                 # print('%s/class_%s_pred_%s \t %s' % (args.save, top_p, name, threshold_output1[idx]))
-                for pred_, output_ in zip(['1', '2', 'and', 'or'], per_class_filter_output_1_2_and_or):
+                for pred_, output_ in zip(
+                    ['1', '2', '12and', '12or', '3', '4', '34and', '34or'],
+                        list(per_class_filter_output_1_2_and_or)+list(per_class_filter_output_3_4_and_or)):
+
                     output = torchvision.transforms.functional.to_pil_image(
                         output_.int().cpu())
                     output_col = output.copy().convert('P')

@@ -99,10 +99,15 @@ def main():
         if args.restore_from == RESTORE_FROM:
             args.restore_from = RESTORE_FROM_VGG
 
+    model.eval()
+    model.cuda(gpu0)
+
     if args.restore_from[:4] == 'http':
-        saved_state_dict = model_zoo.load_url(args.restore_from)
+        saved_state_dict = model_zoo.load_url(
+            args.restore_from, map_location=torch.device(gpu0))
     else:
-        saved_state_dict = torch.load(args.restore_from)
+        saved_state_dict = torch.load(
+            args.restore_from, map_location=torch.device(gpu0))
     # for running different versions of pytorch
     model_dict = model.state_dict()
     saved_state_dict = {k: v for k,
@@ -110,9 +115,6 @@ def main():
     model_dict.update(saved_state_dict)
     ###
     model.load_state_dict(saved_state_dict)
-
-    model.eval()
-    model.cuda(gpu0)
 
     testloader = data.DataLoader(cityscapesDataSet(args.data_dir, args.data_list, None, crop_size=(1024, 512), mean=IMG_MEAN, scale=False, mirror=False, set=args.set),
                                  batch_size=1, shuffle=False, pin_memory=True)

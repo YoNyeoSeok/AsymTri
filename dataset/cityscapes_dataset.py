@@ -32,13 +32,14 @@ class cityscapesDataSet(data.Dataset):
         for name in self.img_ids:
             img_file = osp.join(
                 self.root, "leftImg8bit/%s/%s" % (self.set, name))
-            pslabel_file = osp.join(self.psroot, "%s" % (
-                '_'.join(name.split('_')[:-1]+['psLabel', 'trainIds.png'])))
             self.files.append({
                 "img": img_file,
                 "name": name,
-                "label": pslabel_file,
             })
+            if self.psroot is not None:
+                pslabel_file = osp.join(self.psroot, "%s" % (
+                    '_'.join(name.split('_')[:-1]+['psLabel', 'trainIds.png'])))
+                self.files[-1].update({"label": pslabel_file})
 
     def __len__(self):
         return len(self.files)
@@ -47,22 +48,28 @@ class cityscapesDataSet(data.Dataset):
         datafiles = self.files[index]
 
         image = Image.open(datafiles["img"]).convert('RGB')
-        label = Image.open(datafiles["label"])
+        if self.psroot is not None:
+            label = Image.open(datafiles["label"])
         name = datafiles["name"]
 
         # resize
         image = image.resize(self.crop_size, Image.BICUBIC)
-        label = label.resize(self.crop_size, Image.NEAREST)
+        if self.psroot is not None:
+            label = label.resize(self.crop_size, Image.NEAREST)
 
         image = np.asarray(image, np.float32)
-        label = np.asarray(label, np.float32)
+        if self.psroot is not None:
+            label = np.asarray(label, np.float32)
 
         size = image.shape
         image = image[:, :, ::-1]  # change to BGR
         image -= self.mean
         image = image.transpose((2, 0, 1))
 
-        return image.copy(), label.copy(), np.array(size), name
+        if self.psroot is not None:
+            return image.copy(), label.copy(), np.array(size), name
+        else:
+            return image.copy(), np.array(size), name
 
 
 # if __name__ == '__main__':

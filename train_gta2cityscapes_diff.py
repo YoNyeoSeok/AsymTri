@@ -450,7 +450,7 @@ def main():
             # torch.save(model_D2.state_dict(), osp.join(args.snapshot_dir, 'GTA5_' + str(args.num_steps_stop) + '_D2.pth'))
             if args.use_wandb:
                 if not os.path.exists(osp.join(wandb.run.dir, 'GTA5_' + str(args.num_steps_stop))):
-                    os.makedirs(osp.join(wandb.run.dir, 'GTA5_' + str(i_iter)))
+                    os.makedirs(osp.join(wandb.run.dir, 'GTA5_' + str(args.num_steps_stop)))
                 torch.save(model.state_dict(), osp.join(wandb.run.dir, 'GTA5_' + str(args.num_steps_stop) + '.pth'))
                 save_name_list = model.weight_viz(suptitle='diff{:.2f}'.format(loss_weight_diff),
                                                   save_path=osp.join(wandb.run.dir, 'GTA5_' + str(args.num_steps_stop)))
@@ -471,7 +471,7 @@ def main():
             # torch.save(model_D1.state_dict(), osp.join(args.snapshot_dir, 'GTA5_' + str(i_iter) + '_D1.pth'))
             # torch.save(model_D2.state_dict(), osp.join(args.snapshot_dir, 'GTA5_' + str(i_iter) + '_D2.pth'))
             if args.use_wandb:
-                if not os.path.exists(osp.join(wandb.run.dir, 'GTA5_' + str(args.num_steps_stop))):
+                if not os.path.exists(osp.join(wandb.run.dir, 'GTA5_' + str(i_iter))):
                     os.makedirs(osp.join(wandb.run.dir, 'GTA5_' + str(i_iter)))
                 torch.save(model.state_dict(), osp.join(wandb.run.dir, 'GTA5_' + str(i_iter) + '.pth'))
                 save_name_list = model.weight_viz(suptitle='diff{:.2f}'.format(loss_weight_diff),

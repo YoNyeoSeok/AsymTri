@@ -131,12 +131,17 @@ dmypy.json
 # vscode
 .vscode/
 
+# wandb
+wandb
+
 # AdaptSeg
-data/
+data
 snapshots/
 
-# AsymTri
-snapshots
+# diff
+snapshots_diff
 result
-result_
-wandb
+psLabel
+
+# dualco
+snapshots_dualco

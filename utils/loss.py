@@ -22,15 +22,21 @@ class CrossEntropy2d(nn.Module):
         assert not target.requires_grad
         assert predict.dim() == 4
         assert target.dim() == 3
-        assert predict.size(0) == target.size(0), "{0} vs {1} ".format(predict.size(0), target.size(0))
-        assert predict.size(2) == target.size(1), "{0} vs {1} ".format(predict.size(2), target.size(1))
-        assert predict.size(3) == target.size(2), "{0} vs {1} ".format(predict.size(3), target.size(2))
+        assert predict.size(0) == target.size(
+            0), "{0} vs {1} ".format(predict.size(0), target.size(0))
+        assert predict.size(2) == target.size(
+            1), "{0} vs {1} ".format(predict.size(2), target.size(1))
+        assert predict.size(3) == target.size(
+            2), "{0} vs {1} ".format(predict.size(3), target.size(3))
         n, c, h, w = predict.size()
         target_mask = (target >= 0) * (target != self.ignore_label)
         target = target[target_mask]
-        if not target.data.dim():
-            return Variable(torch.zeros(1))
+        if target_mask.sum() == 0:
+            # assert False, "target mask is all False"
+            return Variable(torch.zeros(1))[0]
         predict = predict.transpose(1, 2).transpose(2, 3).contiguous()
-        predict = predict[target_mask.view(n, h, w, 1).repeat(1, 1, 1, c)].view(-1, c)
-        loss = F.cross_entropy(predict, target, weight=weight, reduction=self.reduction)
+        predict = predict[target_mask.view(
+            n, h, w, 1).repeat(1, 1, 1, c)].view(-1, c)
+        loss = F.cross_entropy(
+            predict, target, weight=weight, reduction=self.reduction)
         return loss

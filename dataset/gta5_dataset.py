@@ -11,18 +11,20 @@ from PIL import Image
 
 
 class GTA5DataSet(data.Dataset):
-    def __init__(self, root, list_path, max_iters=None, crop_size=(321, 321), mean=(128, 128, 128), scale=True, mirror=True, ignore_label=255):
+    def __init__(self, root, list_path, max_iters=None, crop_size=(321, 321), mean_rgb=(128, 128, 128), std_rgb=(1, 1, 1), scale=True, mirror=True, ignore_label=255):
         self.root = root
         self.list_path = list_path
         self.crop_size = crop_size
         self.scale = scale
         self.ignore_label = ignore_label
-        self.mean = mean
+        self.mean_rgb = mean_rgb
+        self.std_rgb = std_rgb
         self.is_mirror = mirror
         # self.mean_bgr = np.array([104.00698793, 116.66876762, 122.67891434])
         self.img_ids = [i_id.strip() for i_id in open(list_path)]
-        if not max_iters==None:
-            self.img_ids = self.img_ids * int(np.ceil(float(max_iters) / len(self.img_ids)))
+        if not max_iters == None:
+            self.img_ids = self.img_ids * \
+                int(np.ceil(float(max_iters) / len(self.img_ids)))
         self.files = []
 
         self.id_to_trainid = {7: 0, 8: 1, 11: 2, 12: 3, 13: 4, 17: 5,
@@ -41,7 +43,6 @@ class GTA5DataSet(data.Dataset):
 
     def __len__(self):
         return len(self.files)
-
 
     def __getitem__(self, index):
         datafiles = self.files[index]
@@ -63,21 +64,22 @@ class GTA5DataSet(data.Dataset):
             label_copy[label == k] = v
 
         size = image.shape
-        image = image[:, :, ::-1]  # change to BGR
-        image -= self.mean
+        image /= 255.0
+        image -= self.mean_rgb
+        image /= self.std_rgb
         image = image.transpose((2, 0, 1))
 
         return image.copy(), label_copy.copy(), np.array(size), name
 
 
-if __name__ == '__main__':
-    dst = GTA5DataSet("./data", is_transform=True)
-    trainloader = data.DataLoader(dst, batch_size=4)
-    for i, data in enumerate(trainloader):
-        imgs, labels = data
-        if i == 0:
-            img = torchvision.utils.make_grid(imgs).numpy()
-            img = np.transpose(img, (1, 2, 0))
-            img = img[:, :, ::-1]
-            plt.imshow(img)
-            plt.show()
+# if __name__ == '__main__':
+#     dst = GTA5DataSet("./data", is_transform=True)
+#     trainloader = data.DataLoader(dst, batch_size=4)
+#     for i, data in enumerate(trainloader):
+#         imgs, labels = data
+#         if i == 0:
+#             img = torchvision.utils.make_grid(imgs).numpy()
+#             img = np.transpose(img, (1, 2, 0))
+#             img = img[:, :, ::-1]
+#             plt.imshow(img)
+#             plt.show()

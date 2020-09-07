@@ -114,31 +114,43 @@ class ResNetDualCo(nn.Module):
 
                     vec = w1 * w2
                     conflict = vec.abs()  # -1, C, K1, K2
-                    c_conflict = vec.sum([1], keepdim=True).abs() # -1, 1, K1, K2
-                    k_conflict = vec.sum([2, 3], keepdim=True).abs()  # -1, C, 1, 1
-                    ck_conflict = vec.sum([1, 2, 3], keepdim=True).abs()  # -1, 1, 1, 1
-                    conflicts = torch.cat([torch.cat([conflict, c_conflict], axis=1).reshape(-1, C+1, K1*K2),
-                                        torch.cat([k_conflict, ck_conflict], axis=1).reshape(-1, C+1, 1),
-                                        ], axis=2)   # -1, C+1, K1*K2+1
+                    c_conflict = vec.sum(
+                        [1], keepdim=True).abs()  # -1, 1, K1, K2
+                    k_conflict = vec.sum(
+                        [2, 3], keepdim=True).abs()  # -1, C, 1, 1
+                    ck_conflict = vec.sum(
+                        [1, 2, 3], keepdim=True).abs()  # -1, 1, 1, 1
+                    conflicts = torch.cat([
+                        torch.cat([conflict, c_conflict],
+                                  axis=1).reshape(-1, C+1, K1*K2),
+                        torch.cat([k_conflict, ck_conflict],
+                                  axis=1).reshape(-1, C+1, 1),
+                    ], axis=2)   # -1, C+1, K1*K2+1
 
                     w1 = w1.detach().cpu().numpy()
                     w2 = w2.detach().cpu().numpy()
-                    
+
                     cf = conflicts.detach().cpu().numpy()
                     cfr = conflicts.abs().detach().cpu().numpy().reshape(B, -1).max(1)
 
-                    fig, axs = plt.subplots(3, 10, sharex=True, sharey=True, figsize=(K1*K2*10//3, K1*K2*3//3))
+                    fig, axs = plt.subplots(
+                        3, 10, sharex=True, sharey=True, figsize=(K1*K2*10//3, K1*K2*3//3))
                     for k in range(10):
-                        axs[0, k].imshow(w1[k].reshape(C, K1*K2)[-K1*K2+1:].T, 'RdGy', vmin=-w1w2r[k], vmax=w1w2r[k])
+                        axs[0, k].imshow(
+                            w1[k].reshape(C, K1*K2)[-K1*K2+1:].T, 'RdGy', vmin=-w1w2r[k], vmax=w1w2r[k])
                         axs[0, k].set_title('layer5_{}{}'.format(n1, k))
-                        axs[1, k].imshow(w2[k].reshape(C, K1*K2)[-K1*K2+1:].T, 'RdGy', vmin=-w1w2r[k], vmax=w1w2r[k])
+                        axs[1, k].imshow(
+                            w2[k].reshape(C, K1*K2)[-K1*K2+1:].T, 'RdGy', vmin=-w1w2r[k], vmax=w1w2r[k])
                         axs[1, k].set_title('layer6_{}{}'.format(n2, k))
-                        axs[2, k].imshow(cf[k][-K1*K2:].T, 'RdGy', vmin=-cfr[k], vmax=cfr[k])
+                        axs[2, k].imshow(
+                            cf[k][-K1*K2:].T, 'RdGy', vmin=-cfr[k], vmax=cfr[k])
                         axs[2, k].set_title('confilcts_{}{}'.format(n1, k))
                     plt.suptitle('{}_{}'.format(m1, suptitle))
-                    plt.savefig('{}/conv{}_{}_sample.jpg'.format(save_path, cn, n1))
+                    plt.savefig(
+                        '{}/conv{}_{}_sample.jpg'.format(save_path, cn, n1))
                     plt.close()
-                    save_name_list.append('conv{}_{}_sample.jpg'.format(cn, n1))
+                    save_name_list.append(
+                        'conv{}_{}_sample.jpg'.format(cn, n1))
         return save_name_list
 
     def get_1x_lr_params_NOscale(self):
@@ -156,8 +168,6 @@ class ResNetDualCo(nn.Module):
         b.append(self.layer2)
         b.append(self.layer3)
         b.append(self.layer4)
-        b.append(self.layer5)
-        b.append(self.layer6)
 
         for i in range(len(b)):
             for j in b[i].modules():
@@ -173,6 +183,8 @@ class ResNetDualCo(nn.Module):
         which does the classification of pixel into classes
         """
         b = []
+        b.append(self.layer5.parameters())
+        b.append(self.layer6.parameters())
         b.append(self.layer7.parameters())
         b.append(self.layer8.parameters())
 

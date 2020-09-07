@@ -117,7 +117,7 @@ def main():
     model.load_state_dict(saved_state_dict)
 
     testloader = data.DataLoader(cityscapesDataSet(args.data_dir, args.data_list, None, crop_size=(1024, 512), mean=IMG_MEAN, scale=False, mirror=False, set=args.set),
-                                 batch_size=1, shuffle=False, pin_memory=True)
+                                 batch_size=1, shuffle=False, pin_memory=False)
 
     interp = nn.Upsample(
         size=(1024, 2048), mode='bilinear', align_corners=True)

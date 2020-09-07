@@ -11,10 +11,9 @@ from PIL import Image
 
 
 class cityscapesDataSet(data.Dataset):
-    def __init__(self, root, list_path, psroot, max_iters=None, crop_size=(321, 321), mean=(128, 128, 128), scale=True, mirror=True, ignore_label=255, set='val'):
+    def __init__(self, root, list_path, max_iters=None, crop_size=(321, 321), mean=(128, 128, 128), scale=True, mirror=True, ignore_label=255, set='val'):
         self.root = root
         self.list_path = list_path
-        self.psroot = psroot
         self.crop_size = crop_size
         self.scale = scale
         self.ignore_label = ignore_label
@@ -26,7 +25,6 @@ class cityscapesDataSet(data.Dataset):
             self.img_ids = self.img_ids * \
                 int(np.ceil(float(max_iters) / len(self.img_ids)))
         self.files = []
-
         self.set = set
         # for split in ["train", "trainval", "val"]:
         for name in self.img_ids:
@@ -34,12 +32,8 @@ class cityscapesDataSet(data.Dataset):
                 self.root, "leftImg8bit/%s/%s" % (self.set, name))
             self.files.append({
                 "img": img_file,
-                "name": name,
+                "name": name
             })
-            if self.psroot is not None:
-                pslabel_file = osp.join(self.psroot, "%s" % (
-                    '_'.join(name.split('_')[:-1]+['psLabel', 'trainIds.png'])))
-                self.files[-1].update({"label": pslabel_file})
 
     def __len__(self):
         return len(self.files)
@@ -48,28 +42,19 @@ class cityscapesDataSet(data.Dataset):
         datafiles = self.files[index]
 
         image = Image.open(datafiles["img"]).convert('RGB')
-        if self.psroot is not None:
-            label = Image.open(datafiles["label"])
         name = datafiles["name"]
 
         # resize
         image = image.resize(self.crop_size, Image.BICUBIC)
-        if self.psroot is not None:
-            label = label.resize(self.crop_size, Image.NEAREST)
 
         image = np.asarray(image, np.float32)
-        if self.psroot is not None:
-            label = np.asarray(label, np.float32)
 
         size = image.shape
         image = image[:, :, ::-1]  # change to BGR
         image -= self.mean
         image = image.transpose((2, 0, 1))
 
-        if self.psroot is not None:
-            return image.copy(), label.copy(), np.array(size), name
-        else:
-            return image.copy(), np.array(size), name
+        return image.copy(), np.array(size), name
 
 
 # if __name__ == '__main__':

@@ -104,7 +104,11 @@ def per_class_iu_torch(hist):
     return hist.diag().float() / (hist.sum(1) + hist.sum(0) - hist.diag()).float()
 
 
+<<<<<<< HEAD
 def eval_iou(info, model, testgttargetloader, testtargetloader, interp_target_gt, args, index, columns, print_index=-1, print_columns=-2):
+=======
+def eval_iou(info, model, testgttargetloader, testtargetloader, interp_target_gt, args, index, columns, print_index=-1, print_columns=4):
+>>>>>>> 1a5233a08820bb414daa2aea93a94e12d47823dc
     num_classes = np.int(info['classes'])
     name_classes = np.array(info['label'], dtype=np.str)
     mapping = torch.from_numpy(
@@ -177,7 +181,11 @@ def eval_iou(info, model, testgttargetloader, testtargetloader, interp_target_gt
                 ind, len(testgttargetloader),
                 index[print_index], columns[print_columns],
                 100*np.nanmean(per_class_iu_torch(hist[print_index][print_columns]).cpu().numpy())))
+<<<<<<< HEAD
             # break
+=======
+
+>>>>>>> 1a5233a08820bb414daa2aea93a94e12d47823dc
         IoUs = np.zeros((len(index), len(columns), num_classes+1))
         for idx, _ in enumerate(index):
             for idx_, _ in enumerate(columns):

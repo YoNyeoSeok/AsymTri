@@ -1,3 +1,4 @@
+from packaging import version
 import os.path as osp
 import numpy as np
 from PIL import Image
@@ -6,73 +7,72 @@ from torch.autograd import Variable
 import pandas as pd
 
 
-def output_to_threshold(max_output, N=10):
-    device = max_output.device
-
-    reshaped_max_output = max_output.reshape(len(max_output), -1)
-    sorted_max_output, _ = reshaped_max_output.sort()
-
+def compute_threshold_table(
+        max_output, argmax_output,
+        C=19, N=10, ignore_class=False):
+    """
+        max_output: Bx(WH|WxH)
+        argmax_output: Bx(WH|WxH)
+        if ignore_class- is None:
+            return BxCxN
+        else
+            return Bx1xN
+    """
+    assert max_output.shape == argmax_output.shape
+    if max_output.dim() == 2:
+        B, WH = max_output.shape
+    elif max_output.dim() == 3:
+        B, W, H = max_output.shape
+        WH = W*H
+    else:
+        assert False, "output dimension should be 2 or 3. {}".format(
+            max_output.dim())
+    # BxWH
+    sorted_max_output, sorted_idx_max_output = max_output.reshape(
+        B, -1).sort(-1)
+    sorted_idx_argmax_output = argmax_output.reshape(
+        B, -1).gather(1, sorted_idx_max_output)
+    # BxWH+1
     inf_pad_max_output = torch.cat(
         [sorted_max_output,
-         torch.full((len(max_output), 1), float('inf'), device=device)],
-        dim=1)
-    threshold_idx_output = torch.linspace(
-        0, sorted_max_output.shape[1], N+1, device=device)[:-1].round().long()
-    threshold_output = inf_pad_max_output[:, threshold_idx_output]
-    return threshold_output
-
-
-def output_to_class_threshold(max_output, argmax_output, N=10, num_classes=19):
-    device = max_output.device
-    reshaped_max_output, reshaped_argmax_output = list(map(
-        lambda output: output.reshape(len(max_output), -1),
-        [max_output, argmax_output]
-    ))
-
-    sorted_max_output, sorted_idx_max_output = reshaped_max_output.sort()
-    sorted_idx_argmax_output = reshaped_argmax_output.gather(
-        1, sorted_idx_max_output)
-    inf_pad_max_output = torch.cat(
-        [sorted_max_output,
-            torch.full((len(max_output), 1), float('inf'), device=device)],
+         torch.full_like(sorted_max_output[:, :1], float('inf'))],
         dim=1)
 
-    per_class_threshold_output = torch.empty(
-        (len(max_output), num_classes, N), device=device)
-    for c in range(num_classes):
-        mask = sorted_idx_argmax_output == c
-        last_pad_mask = torch.cat(
-            [mask, torch.ones((len(max_output), 1), device=device).bool()],
-            dim=1)
-        threshold_idx_output = torch.cat([
-            last_pad_mask[b].nonzero()[
-                torch.linspace(0, mask_sum, N+1, device=device)[:-1].round().long()]
-            for b, mask_sum in enumerate(mask.sum(1))],
-            dim=1).transpose(0, 1)
-        threshold_output = inf_pad_max_output.gather(1, threshold_idx_output)
+    # BxWHx(1|C)
+    mask = sorted_idx_argmax_output.unsqueeze(-1)
+    mask = mask != C + \
+        1 if ignore_class else mask == torch.arange(C, device=mask.device)
 
-        per_class_threshold_output[:, c] = threshold_output
-    return per_class_threshold_output
+    # BxNx(1|C)
+    if version.parse(np.__version__) >= version.parse("1.16.0"):
+        threshold_lin_idx = torch.from_numpy(
+            # BxNx(1|C)
+            np.linspace(0, mask.sum(1).cpu().numpy(), N+1, axis=1)[:, :-1]
+        ).to(mask.device).round().long()
+    else:
+        from linspace import linspace
+        threshold_lin_idx = torch.from_numpy(
+            # BxNx(1|C)
+            linspace(0, mask.sum(1).cpu().numpy(), N+1, axis=1)[:, :-1]
+        ).to(mask.device).round().long()
 
+    # BxWH+1x(1|C)
+    last_pad_mask = torch.cat([mask, torch.ones_like(mask[:, :1])], dim=1)
+    true_idx_sorted = (torch.arange(WH+1, device=mask.device).unsqueeze(-1) -
+                       last_pad_mask.int()*WH).argsort(1)
+    # [BxWH+1x(1|C)].gather(1, BxNx(C|1)) -> BxNx(C|1)
+    threshold_output_idx = true_idx_sorted.gather(
+        1, threshold_lin_idx)
 
-def filter_two_output(
-        max_output1, max_output2,
-        argmax_output1, argmax_output2,
-        threshold_output1, threshold_output2,
-        ignore_label,):
-    filter_output1 = argmax_output1.masked_fill(
-        mask=max_output1 < threshold_output1, value=ignore_label)
-    filter_output2 = argmax_output2.masked_fill(
-        mask=max_output2 < threshold_output2, value=ignore_label)
-    filter_output_and = filter_output1.masked_fill(
-        mask=filter_output1 != filter_output2, value=ignore_label)
-    filter_output_or = filter_output_and.flatten().masked_scatter(
-        mask=filter_output1.flatten() == 255,
-        source=filter_output2.flatten()[filter_output1.flatten() == 255]).masked_scatter(
-            mask=filter_output2.flatten() == 255,
-            source=filter_output1.flatten()[filter_output2.flatten() == 255]).reshape(
-                *filter_output_and.shape)
-    return filter_output1, filter_output2, filter_output_and, filter_output_or
+    # [BxWH+1].gather(1, BxNx(C|1) -> BxN(C|1) ) -> BxN(C|1)
+    per_class_threshold_output = inf_pad_max_output.gather(
+        1, threshold_output_idx.reshape(B, -1))
+    # BxN(C|1) -> BxNx(C|1)
+    del mask
+    del threshold_lin_idx
+    del last_pad_mask
+    del true_idx_sorted
+    return per_class_threshold_output.reshape_as(threshold_output_idx)
 
 
 def per_class_filter_two_output(
@@ -86,12 +86,17 @@ def per_class_filter_two_output(
         mask=max_output2 < per_class_threshold_output2, value=ignore_label)
     per_class_filter_output_and = per_class_filter_output1.masked_fill(
         mask=per_class_filter_output1 != per_class_filter_output2, value=ignore_label)
-    per_class_filter_output_or = per_class_filter_output_and.flatten().masked_scatter(
-        mask=per_class_filter_output1.flatten() == ignore_label,
-        source=per_class_filter_output2.flatten()[per_class_filter_output1.flatten() == ignore_label]).masked_scatter(
-            mask=per_class_filter_output2.flatten() == ignore_label,
-            source=per_class_filter_output1.flatten()[per_class_filter_output2.flatten() == ignore_label]).reshape(
-                *per_class_filter_output_and.shape)
+    f1 = per_class_filter_output1.flatten()
+    f2 = per_class_filter_output2.flatten()
+    mf1 = f1 == ignore_label
+    mf2 = f2 == ignore_label
+    per_class_filter_output_or = per_class_filter_output_and.clone().flatten()
+    per_class_filter_output_or.masked_scatter_(
+        mask=mf1, source=f2[mf1])
+    per_class_filter_output_or.masked_scatter_(
+        mask=mf2, source=f1[mf2])
+    per_class_filter_output_or = per_class_filter_output_or.reshape(
+        *per_class_filter_output_and.shape)
     return per_class_filter_output1, per_class_filter_output2, per_class_filter_output_and, per_class_filter_output_or
 
 
@@ -100,99 +105,154 @@ def fast_hist_torch(a, b, n):
     return torch.bincount(n * a[k].int() + b[k], minlength=n ** 2).reshape(n, n)
 
 
+def fast_hist_batch(a, b, n):
+    # B x WH
+    k = (a >= 0) & (a < n) & (b >= 0) & (b < n)
+    mat = n*a+b
+    hist = torch.zeros((*mat.shape[:-1], mat.max().item()+1),
+                       dtype=mat.dtype,
+                       device=mat.device)
+    hist = hist.scatter_add(-1, mat, k.to(hist.dtype))
+    del mat
+    return hist[..., :n**2].reshape(*k.shape[:-1], n, n)
+
+
 def per_class_iu_torch(hist):
     return hist.diag().float() / (hist.sum(1) + hist.sum(0) - hist.diag()).float()
 
 
-def eval_iou(info, model, testgttargetloader, testtargetloader, interp_target_gt, args, index, columns, print_index=-1, print_columns=-2):
-    num_classes = np.int(info['classes'])
-    name_classes = np.array(info['label'], dtype=np.str)
-    mapping = torch.from_numpy(
-        np.array(info['label2train'])).byte().cuda(args.gpu)
-    hist = torch.zeros(
-        (len(index), len(columns), num_classes, num_classes)).cuda(args.gpu)
+def per_class_iu_batch(hist):
+    return hist.diagonal(0, -2, -1).float() / (hist.sum(-2) + hist.sum(-1) - hist.diagonal(0, -2, -1)).float()
 
-    model.eval()
-    with torch.no_grad():
-        for ind, (gt_batch, batch) in enumerate(zip(testgttargetloader, testtargetloader)):
-            _, _, gt_name = gt_batch
-            images, _, name = batch
-            assert len(name) == len(gt_name)
-            batch_size = len(name)
-            for name_, gt_name_ in zip(name, gt_name):
-                assert ('_'.join(name_.split('_')[:-1]) ==
-                        '_'.join(gt_name_.split('_')[:-2]))
 
-            gt_labelIds = torch.stack(
-                [torch.from_numpy(np.array(Image.open(
-                    osp.join(args.gt_dir_target, 'val', gt_name_)))).cuda(args.gpu)
-                 for gt_name_ in gt_name])
-            gt_trainIds = gt_labelIds.clone()
+def load_gt(name, gt_dir, set):
+    gt_labelIds = torch.stack([
+        torch.from_numpy(np.array(Image.open(osp.join(
+            gt_dir, set, '_'.join(n.split('_')[:-1]+['gtFine', 'labelIds.png']))
+        )))
+        for n in name])
+    return gt_labelIds
 
-            for inx in range(len(mapping)):
-                gt_trainIds.masked_scatter_(
-                    gt_labelIds == mapping[inx][0],
-                    torch.full_like(
-                        gt_labelIds, mapping[inx][1], device=args.gpu)
-                )
 
-            images = images.cuda(args.gpu)
-            output12 = model(images)
-            output12 = list(map(interp_target_gt, output12))
+def label_mapping(gt_labelIds, mapping):
+    gt_trainIds = gt_labelIds.clone()
+    for inx, (labelId, trainId) in enumerate(mapping):
+        gt_trainIds.masked_scatter_(
+            gt_labelIds == labelId,
+            torch.full_like(gt_labelIds, trainId).to(gt_labelIds.device))
+    return gt_trainIds
 
-            # save max_output, argmax
-            max_output12, argmax_output12 = list(zip(*list(map(
-                lambda output: output.max(1), output12))))
-            # compute threshold (N=10)
-            threshold_output12 = list(
-                map(output_to_threshold, max_output12))
-            per_class_threshold_output12 = list(
-                map(output_to_class_threshold, max_output12, argmax_output12))
 
-            for idx, _ in enumerate(index):
-                filter_output_1_2_and_or = filter_two_output(
-                    *max_output12,
-                    *argmax_output12,
-                    *list(map(lambda thr_output: thr_output[:, idx, None, None], threshold_output12)),
-                    args.ignore_label,
-                )
-                per_class_filter_output_1_2_and_or = per_class_filter_two_output(
-                    *max_output12,
-                    *argmax_output12,
-                    *list(map(
-                        lambda thr_output, argmax_output:
-                        thr_output[:, :, idx].gather(
-                            1, argmax_output.reshape(len(argmax_output), -1)
-                        ).reshape(*argmax_output.shape),
-                        per_class_threshold_output12, argmax_output12)),
-                    args.ignore_label,
-                )
+def compute_filtered_output_a_b_and_or(
+        max_output_ab, argmax_output_ab,
+        ignore_label=255, C=19, N=10, ignore_class=False):
+    assert len(max_output_ab) == 2 and len(argmax_output_ab) == 2
+    if not isinstance(max_output_ab, torch.Tensor):
+        max_output_ab = torch.stack(max_output_ab)
+    if not isinstance(argmax_output_ab, torch.Tensor):
+        argmax_output_ab = torch.stack(argmax_output_ab)
+    assert max_output_ab.shape == argmax_output_ab.shape
 
-                # compute iou
-                for idx_, pred in enumerate(
-                        list(filter_output_1_2_and_or)+list(per_class_filter_output_1_2_and_or)):
-                    hist[idx][idx_] += fast_hist_torch(gt_trainIds.flatten(),
-                                                       pred.flatten(), num_classes)
-            print('{:d} / {:d} ({}, {}): {:0.2f}'.format(
-                ind, len(testgttargetloader),
-                index[print_index], columns[print_columns],
-                100*np.nanmean(per_class_iu_torch(hist[print_index][print_columns]).cpu().numpy())))
-            # break
-        IoUs = np.zeros((len(index), len(columns), num_classes+1))
-        for idx, _ in enumerate(index):
-            for idx_, _ in enumerate(columns):
-                IoUs[idx, idx_, :-1] = per_class_iu_torch(
-                    hist[idx][idx_]).cpu().numpy()
-        IoUs[:, :, -1] = np.nanmean(IoUs[:, :, :-1], axis=-1)
+    if max_output_ab.dim() == 3:
+        _, B, WH = max_output_ab.shape
+        BB = B*2
+    elif max_output_ab.dim() == 4:
+        _, B, W, H = max_output_ab.shape
+        BB, WH = B*2, W*H
+    else:
+        assert False
 
-        dfs = {}
-        for ind_class in range(num_classes+1):
-            name_class = name_classes[ind_class] if ind_class < num_classes else 'mIoU'
-            df = pd.DataFrame(IoUs[:, :, ind_class],
-                              index=index, columns=columns)
-            dfs.update({name_class: df})
+    # BBx(WH|WxH)
+    max_output = torch.cat([*max_output_ab])
+    argmax_output = torch.cat([*argmax_output_ab])
 
-            print('===> {} ({}, {}):\t {:.2f}'.format(
-                name_class, index[print_index], columns[print_columns],
-                100*IoUs[print_index, print_columns, ind_class]))
-    return dfs
+    # BBxNx(C|1)
+    thr_tb = compute_threshold_table(
+        # BBx(WH|WxH)
+        max_output,
+        argmax_output,
+        C=C, N=N, ignore_class=ignore_class,
+    )
+
+    # [BBxNx(C|1)].gather(2, BBxNxWH) ) -> BBxNxWH
+    # BBxNxWH -> BBxNx(WH|WxH)
+    thr_output = thr_tb.gather(
+        2,
+        # [BBx(WH|WxH) -> BBx1xWH].repeat(1xNx1) -> BBxNxWH
+        torch.zeros((BB, N, WH), dtype=torch.long, device=argmax_output.device)
+        if ignore_class else
+        argmax_output.reshape(BB, 1, WH).repeat(1, N, 1)
+    ).reshape(BB, N, *argmax_output.shape[1:])
+
+    # stack(4x(NxBx(WH|WxH)), 0) -> 4xNxBx(WH|WxH)
+    filtered_output = torch.stack(
+        # 4x(NxBx(WH|WxH))
+        per_class_filter_two_output(
+            *max_output.split(B),
+            *argmax_output.split(B),
+            # stack(Nx(BBx1x(WH|WxH))) -> NxBBx1x(WH|WxH)
+            # [NxBBx1x(WH|WxH)].squeeze(2).split(B, 1) -> 2x(NxBx(WH|WxH))
+            *torch.stack(
+                # [BBxNx(WH|WxH)].split(1, 1) -> Nx(BBx1x(WH|WxH))
+                thr_output.split(1, 1)).squeeze(2).split(B, 1),
+            ignore_label,),
+        dim=0)
+    # 4xNxBx(WH|WxH)
+    return filtered_output
+
+
+def main():
+    B, W, H = 1, 1024, 1024
+    num_classes = 19
+    gt_labelIds = torch.empty((B*2, W, H)).random_(255).long().cuda()
+    output = torch.randn((B*2, 255, W, H)).cuda()
+    max_output, argmax_output = output.max(1)
+
+    filtered_output = compute_filtered_output_a_b_and_or(
+        max_output.split(B), argmax_output.split(B)).repeat(4, 1, 1, 1, 1)
+    import time
+    t = time.time()
+    hist_ = fast_hist_batch(gt_labelIds.flatten(-2),
+                            filtered_output.flatten(-2), 19)
+    print(time.time()-t)
+    t = time.time()
+    IoUs = torch.stack(list(map(
+        lambda h: per_class_iu_torch(h),
+        hist_.reshape(-1, num_classes, num_classes)
+    ))).reshape(16, -1, num_classes)
+    print(time.time()-t)
+    t = time.time()
+    IoUs = per_class_iu_batch(hist_)
+    print(time.time()-t)
+    t = time.time()
+    mIoU = np.nanmean(IoUs.cpu().numpy(), axis=-1)
+
+    del hist_
+    torch.cuda.empty_cache()
+
+    t = time.time()
+    hist = torch.empty(16*10, B, 19, 19).long()
+    for i, o in enumerate(filtered_output.flatten(0, -4)):
+        for j in range(B):
+            # print(i, j, gt_labelIds[j].shape, o[j].shape)
+            hist[i, j, :, :] = fast_hist_torch(gt_labelIds[j], o[j], 19)
+    hist = hist.reshape(16, 10, B, 19, 19)
+    print(time.time()-t)
+    del hist
+    torch.cuda.empty_cache()
+
+    t = time.time()
+    hist = torch.stack(list(map(
+        lambda output: torch.stack(list(map(
+            lambda gt, pred: fast_hist_torch(
+                gt, pred, 19),
+            gt_labelIds, output))),
+        filtered_output.flatten(0, -4))))
+    print(time.time()-t)
+    del hist
+    torch.cuda.empty_cache()
+    return 0
+
+
+if __name__ == '__main__':
+    main()

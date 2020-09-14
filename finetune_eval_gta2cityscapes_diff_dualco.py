@@ -1,4 +1,5 @@
 import argparse
+import time
 import torch
 import torch.nn as nn
 from torch.utils import data, model_zoo
@@ -17,9 +18,11 @@ import random
 import json
 import pandas as pd
 from PIL import Image
-from eval_iou import (eval_iou, output_to_threshold,
-                      output_to_class_threshold, per_class_filter_two_output,
-                      fast_hist_torch, per_class_iu_torch)
+from eval_iou import (load_gt, label_mapping,
+                      per_class_filter_two_output,
+                      compute_filtered_output_a_b_and_or,
+                      fast_hist_torch, per_class_iu_torch,
+                      fast_hist_batch, per_class_iu_batch)
 
 from model.deeplab_multi import DeeplabMulti
 from model.deeplab_dualco import DeeplabDualCo
@@ -63,19 +66,21 @@ NUM_STEPS_START = 0
 NUM_STEPS_STOP = 18000  # 150000  # early stopping (6 epoch)
 POWER = 0.9
 RANDOM_SEED = 1234
-# RESTORE_FROM = 'http://vllab.ucmerced.edu/ytsai/CVPR18/DeepLab_resnet_pretrained_init-f81d91e8.pth'
-RESTORE_FROM = './model/gta_src.pth'
+RESTORE_FROM = 'http://vllab.ucmerced.edu/ytsai/CVPR18/DeepLab_resnet_pretrained_init-f81d91e8.pth'
+# RESTORE_FROM = './model/gta_src.pth'
 SAVE_NUM_IMAGES = 2
 SAVE_PRED_EVERY = 100  # 600  # 5000
 SNAPSHOT_DIR = './snapshots_dualco/'
 WEIGHT_DECAY = 0.001
 
+LAMBDA_LOSS = [.0, .0, 1., .0]  # 0.005
+
 ORTH = []
 NORM = 2
 LAMBDA_DIFF = [0.5, 0.5]  # 0.005
 
-PSLABEL_THRESHOLD = '90_100'
-PSLABEL_POLICY = 'per_class_and'
+PSLABEL_THRESHOLD = '10,90_100'
+PSLABEL_POLICY = 'per_class_1and2'
 
 TARGET = 'cityscapes'
 # SET = 'train'
@@ -122,6 +127,8 @@ def get_arguments():
                         help="Path to the file listing the images in the target gt dataset.")
     parser.add_argument("--input-size-target-gt", type=str, default=INPUT_SIZE_TARGET_GT,
                         help="Comma-separated string with height and width of target gt images.")
+    parser.add_argument('--lambda_loss', type=float, nargs=4, default=LAMBDA_LOSS,
+                        help="lambda_loss for classifier losses.")
     parser.add_argument('--orth', type=int, nargs='*', default=ORTH,
                         choices=[1, 2, 3],
                         help="orthogonal dimension for weight difference."
@@ -132,9 +139,9 @@ def get_arguments():
     parser.add_argument('--lambda_diff', type=float, nargs=2, default=LAMBDA_DIFF,
                         help="lambda_diff for weight difference.")
     parser.add_argument('--pslabel-threshold', type=str, default=PSLABEL_THRESHOLD,
-                        help="pslabel_threshold. (00_100 ~ 90_100)")
+                        help="pslabel_threshold. ('10,00_100' ~ '10,90_100')")
     parser.add_argument('--pslabel-policy', type=str, default=PSLABEL_POLICY,
-                        help="pslabel policy (1, 2, and, or, per_class_1, per_class_2, per_class_and, per_class_or).")
+                        help="pslabel policy (a, b, per_class_a, per_class_b, aandb, aorb for a, b in [[1, 2], [3, 4]]), default: per_class_1and2.")
     parser.add_argument("--is-training", action="store_true",
                         help="Whether to updates the running means and variances during the training.")
     parser.add_argument("--learning-rate", type=float, default=LEARNING_RATE,
@@ -177,9 +184,6 @@ def get_arguments():
     return parser.parse_args()
 
 
-args = get_arguments()
-
-
 def loss_calc(pred, label, ignore_label, gpu):
     """
     This function returns cross entropy loss for semantic segmentation
@@ -210,7 +214,101 @@ def adjust_learning_rate_D(optimizer, i_iter):
         optimizer.param_groups[1]['lr'] = lr * 10
 
 
-def main():
+def eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
+               testtargetloader, mapping, interp_target_gt):
+    model.eval()
+    hist = torch.zeros(
+        (len(policy_index), len(thr_columns), num_classes, num_classes)).cuda(args.gpu)
+    with torch.no_grad():
+        for ind, batch in enumerate(testtargetloader):
+            images, _, name = batch
+            images = images.cuda(args.gpu)
+            gt_labelIds = load_gt(name, args.gt_dir_target,
+                                  'val').cuda(args.gpu)
+            gt_trainIds = label_mapping(gt_labelIds, mapping)
+
+            # 4BxCxWxH
+            output1234 = torch.cat(model(images))
+            # 4xBxCxWxH
+            output1234 = interp_target_gt(output1234)
+            output1234 = output1234.reshape(4, -1, *output1234.shape[1:])
+            # 4xBxWxH
+            max_output1234, argmax_output1234 = output1234.max(2)
+
+            t = time.time()
+            # 16xNxBxWxH
+            filtered_output_1_2_1and2_1or2_3_4_3and4_3or4 = torch.cat(list(map(
+                lambda max_output_ab, argmax_output_ab:
+                    # 8xNxBxWxH
+                    torch.cat(list(map(
+                        # 4xNxBxWxH
+                        lambda igc: compute_filtered_output_a_b_and_or(
+                            max_output_ab, argmax_output_ab,
+                            ignore_label=args.ignore_label, C=num_classes, N=10, ignore_class=igc),
+                        [True, False]
+                    ))),
+                max_output1234.split(2), argmax_output1234.split(2)
+            )))
+            at = time.time()-t
+
+            t = time.time()
+            # WHY BATCH IS MORE SLOWER?
+            # [16xNxBx19x19].sum(2) -> 16xNx19x19
+            hist += torch.stack(list(map(
+                lambda pred_batch: torch.stack(list(map(
+                    lambda gt, pred_batch: fast_hist_torch(
+                        gt, pred_batch, num_classes),
+                    gt_trainIds, pred_batch
+                ))),
+                filtered_output_1_2_1and2_1or2_3_4_3and4_3or4.flatten(0, -4)
+            ))).reshape(*filtered_output_1_2_1and2_1or2_3_4_3and4_3or4.shape[:-2], num_classes, num_classes).sum(2)
+            # WHY BATCH IS MORE SLOWER?
+            # [16xNxBx19x19].sum(2) -> 16xNx19x19
+            # hist += fast_hist_batch(
+            #     # [BxWxH].flatten(-2) -> BxWH
+            #     gt_trainIds.flatten(-2),
+            #     # [16xNxBxWxH].flatten(-2) -> 16xNxBxWH
+            #     filtered_output_1_2_1and2_1or2_3_4_3and4_3or4.flatten(
+            #         -2),
+            #     num_classes).sum(2)
+            bt = time.time()-t
+
+            t = time.time()
+            # 16xNx19
+            IoUs = per_class_iu_batch(hist)
+            mIoU = np.nanmean(IoUs.cpu().numpy(), -1)
+            ct = time.time()-t
+
+            t = time.time()
+            dfs = {}
+            for ind_class in range(num_classes):
+                name_class = name_classes[ind_class]
+                df = pd.DataFrame(IoUs[:, :, ind_class],
+                                  index=policy_index, columns=thr_columns)
+                dfs.update({name_class: df})
+            dfs.update({'mIoU': mIoU})
+            dt = time.time()-t
+
+            print('[{:4d}/{:4d}]===> {} ({}, {}):\t {:.2f}'.format(
+                ind, len(testtargetloader), 'mIoU', args.pslabel_policy, threshold,
+                100*mIoU[policy_index.index(args.pslabel_policy), thr_columns.index(threshold)]))
+            tt = at+bt+ct+dt
+            # print(at+bt+ct+dt, at/tt, bt/tt, ct/tt, dt/tt)
+
+            del filtered_output_1_2_1and2_1or2_3_4_3and4_3or4, IoUs, mIoU
+            torch.cuda.empty_cache()
+            break
+
+    if args.use_wandb:
+        for name_class, df in dfs.items():
+            wandb.log({
+                '{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
+                for top_p in policy_index
+                for filter_output in thr_columns
+            }, step=0)
+
+
+def main(args):
     """Create the model and start the training."""
 
     if args.use_wandb:
@@ -235,6 +333,7 @@ def main():
     name_classes = np.array(info['label'], dtype=np.str)
     mapping = torch.from_numpy(
         np.array(info['label2train'])).byte().cuda(args.gpu)
+
     # Create network
     if 'DeepLab' in args.model:
         if args.model == 'DeepLabDualCo':
@@ -249,7 +348,16 @@ def main():
         if args.restore_from[:4] == 'http':
             saved_state_dict = model_zoo.load_url(
                 args.restore_from, map_location=torch.device(args.gpu))
-            raise NotImplementedError("TODO")
+
+            new_params = model.state_dict().copy()
+            for i in saved_state_dict:
+                # Scale.layer5.conv2d_list.3.weight
+                i_parts = i.split('.')
+                # print i_parts
+                if not args.num_classes == 19 or not i_parts[1] == 'layer5':
+                    new_params['.'.join(i_parts[1:])] = saved_state_dict[i]
+                    # print i_parts
+            saved_state_dict = new_params
         elif args.restore_from.split('/')[-1] == 'gta_src.pth':
             saved_state_dict = torch.load(
                 args.restore_from, map_location=torch.device(args.gpu))
@@ -296,16 +404,10 @@ def main():
                                                          crop_size=input_size_target,
                                                          scale=False, mirror=False, mean_rgb=IMG_MEAN[::-1], std_rgb=IMG_STD[::-1],
                                                          set='val'),
-                                       batch_size=args.batch_size*10, shuffle=False,
+                                       batch_size=args.batch_size*1, shuffle=False,
                                        #    pin_memory=True
                                        )
-    testgttargetloader = data.DataLoader(cityscapesDataSet(args.gt_dir_target, args.gt_list_target_test,
-                                                           crop_size=input_size_target_gt,
-                                                           scale=False, mirror=False, mean_rgb=IMG_MEAN[::-1], std_rgb=IMG_STD[::-1],
-                                                           set='val'),
-                                         batch_size=args.batch_size*10, shuffle=False,
-                                         #  pin_memory=True
-                                         )
+
     interp = nn.Upsample(
         size=(input_size[1], input_size[0]),
         mode='bilinear', align_corners=False)
@@ -316,26 +418,29 @@ def main():
         size=(input_size_target_gt[1], input_size_target_gt[0]),
         mode='bilinear', align_corners=False)
 
-    index = ['{0:02d}_{1:d}'.format(p, 100)
-             for p in range(0, 100, 10)]
-    columns = ['1', '2', 'and', 'or', 'per_class_1',
-               'per_class_2', 'per_class_and', 'per_class_or']
-    dfs = eval_iou(info, model, testgttargetloader, testtargetloader,
-                   interp_target_gt, args, index, columns)
-    if args.use_wandb:
-        for name_class, df in dfs.items():
-            wandb.log({
-                '{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
-                for top_p in index
-                for filter_output in columns
-            }, step=0)
+    n_threshold, threshold = args.pslabel_threshold.split(',')
+    n_threshold = int(n_threshold)
+    thr_columns = ['{0:02d}_{1:d}'.format(p, 100)
+                   for p in range(0, 100, n_threshold)]
+    policy_index = ['1', '2', '1and2', '1or2',
+                    'per_class_1', 'per_class_2', 'per_class_1and2', 'per_class_1or2',
+                    '3', '4', '3and4', '3or4',
+                    'per_class_3', 'per_class_4', 'per_class_3and4', 'per_class_3or4',
+                    ]
 
+    print('before eval')
+    print(torch.cuda.memory_summary(args.gpu))
+    eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
+               testtargetloader, mapping, interp_target_gt)
+    print('after eval')
+    print(torch.cuda.memory_summary(args.gpu))
     params = model.optim_parameters(args)
     optimizer = optim.SGD(params,
                           lr=args.learning_rate, momentum=args.momentum, weight_decay=args.weight_decay)
     optimizer.zero_grad()
 
     for i_iter in range(args.num_steps_start, args.num_steps):
+        model.train()
 
         loss_seg_value1 = 0
         loss_seg_value2 = 0
@@ -345,23 +450,26 @@ def main():
         loss_seg_target_value3 = 0
         loss_seg_target_value4 = 0
 
-        optimizer.zero_grad()
         adjust_learning_rate(optimizer, i_iter)
 
         for sub_i in range(args.iter_size):
+            optimizer.zero_grad()
             # train with source
             _, batch = next(trainloader_iter)
             images, labels, _, _ = batch
             images = Variable(images).cuda(args.gpu)
 
-            pred12 = model(images)[:2]
-            pred12 = list(map(interp, pred12))
+            # 4BxCxWxH
+            output1234 = torch.cat(model(images))
+            # 4xBxCxWxH
+            pred1234 = interp(output1234)
+            pred1234 = pred1234.reshape(4, -1, *pred1234.shape[1:])
+            # 4xBxWxH
 
-            loss_seg12 = list(map(
+            loss_seg1, loss_seg2, _, _ = list(map(
                 lambda pred: loss_calc(
                     pred, labels, args.ignore_label, args.gpu),
-                pred12))
-            loss_seg1, loss_seg2 = loss_seg12
+                pred1234))
 
             loss_diff = model.weight_diff(
                 orth=args.orth, norm=args.norm)
@@ -374,102 +482,128 @@ def main():
             loss_seg_value1 += loss_seg1.detach().cpu().numpy() / args.iter_size
             loss_seg_value2 += loss_seg2.detach().cpu().numpy() / args.iter_size
             loss_diff_value += loss_diff.detach().cpu().numpy() / args.iter_size
+            optimizer.step()
+            optimizer.zero_grad()
 
+            del images, output1234, pred1234, loss_seg1, loss_seg2, loss_diff, loss
+            torch.cuda.empty_cache()
             # train with target
-            _, batch = next(targetloader_iter)
-            images, _, name = batch
-            images = Variable(images).cuda(args.gpu)
+            # _, batch = next(targetloader_iter)
+            # images, _, name = batch
+            # images = Variable(images).cuda(args.gpu)
 
-            pred_target1234 = model(images)
-            pred_target1234 = list(
-                map(interp_target, pred_target1234))
+            # # 4BxCxWxH
+            # output1234 = torch.cat(model(images))
+            # # 4xBxCxWxH
+            # target1234 = interp_target(output1234)
+            # target1234 = target1234.reshape(4, -1, *target1234.shape[1:])
+            # # 4xBxWxH
+            # max_output1234, argmax_output1234 = target1234.max(2)
 
-            # pslabel
-            max_output12, argmax_output12 = list(zip(*list(map(
-                lambda output: output.max(1), pred_target1234[:2]))))
-            if columns.index(args.pslabel_policy) > 3:
-                # threshold 90_100
-                per_class_threshold_output12 = list(map(
-                    lambda max_output, argmax_output:
-                    # compute threshold (N=10)
-                    output_to_class_threshold(max_output, argmax_output)[:, :, index.index(args.pslabel_threshold)].gather(
-                        1, argmax_output.reshape(len(argmax_output), -1)
-                    ).reshape(*argmax_output.shape),
-                    max_output12, argmax_output12))
-                # pslabel_policy per_class_and
-                pslabel = per_class_filter_two_output(
-                    *max_output12,
-                    *argmax_output12,
-                    *per_class_threshold_output12,
-                    args.ignore_label,
-                )[columns.index(args.pslabel_policy)-4]
-            else:
-                raise NotImplementedError
+            # # 16xNxBxWxH
+            # filtered_output_1_2_1and2_1or2_3_4_3and4_3or4 = torch.cat(list(map(
+            #     lambda max_output_ab, argmax_output_ab:
+            #         # 8xNxBxWxH
+            #         torch.cat(list(map(
+            #             # 4xNxBxWxH
+            #             lambda igc: compute_filtered_output_a_b_and_or(
+            #                 max_output_ab, argmax_output_ab,
+            #                 ignore_label=args.ignore_label, C=num_classes, N=10, ignore_class=igc),
+            #             [True, False]
+            #         ))),
+            #     max_output1234.split(2), argmax_output1234.split(2)
+            # )))
+            # # pslabel
+            # pslabel = filtered_output_1_2_1and2_1or2_3_4_3and4_3or4[
+            #     policy_index.index(args.pslabel_policy),
+            #     thr_columns.index(threshold)]
 
-            gt_labelIds = torch.stack(
-                [torch.from_numpy(np.array(Image.open(
-                    osp.join(args.gt_dir_target, 'train', '_'.join(
-                        name.split('_')[:-1]+['gtFine', 'labelIds.png']
-                    ))))).cuda(args.gpu)
-                 for name_ in name])
-            gt_trainIds = gt_labelIds.clone()
+            # loss_seg_target1234 = list(map(
+            #     lambda pred_target: loss_calc(
+            #         pred_target, pslabel, args.ignore_label, args.gpu),
+            #     target1234))
+            # loss_seg_target1, loss_seg_target2, loss_seg_target3, loss_seg_target4 = loss_seg_target1234
 
-            for inx in range(len(mapping)):
-                gt_trainIds.masked_scatter_(
-                    gt_labelIds == mapping[inx][0],
-                    torch.full_like(
-                        gt_labelIds, mapping[inx][1], device=args.gpu)
-                )
+            # loss = torch.stack(loss_seg_target1234) @ \
+            #     torch.from_numpy(np.array(args.lambda_loss)).to(
+            #         dtype=loss_seg_target1.dtype, device=args.gpu)
+            # loss = loss / args.iter_size
+            # loss.backward()
+            # loss_seg_target_value1 += loss_seg_target1.detach().cpu().numpy() / \
+            #     args.iter_size
+            # loss_seg_target_value2 += loss_seg_target2.detach().cpu().numpy() / \
+            #     args.iter_size
+            # loss_seg_target_value3 += loss_seg_target3.detach().cpu().numpy() / \
+            #     args.iter_size
+            # loss_seg_target_value4 += loss_seg_target4.detach().cpu().numpy() / \
+            #     args.iter_size
 
-            hist = fast_hist_torch(gt_trainIds.flatten(),
-                                   pslabel.detach().flatten(), num_classes)
-            IoUs = np.zeros((num_classes+1))
-            IoUs[:-1] = per_class_iu_torch(hist).cpu().numpy()
-            IoUs[-1] = np.nanmean(IoUs[:-1], axis=-1)
+            # torch.cuda.empty_cache()
+            # 4BxCxWxH
+            # target1234 = interp_target_gt(output1234)
+            # target1234 = target1234.reshape(4, -1, *target1234.shape[1:])
+            # # 4xBxWxH
+            # max_output1234, argmax_output1234 = target1234.max(2)
 
-            loss_seg_target1234 = list(map(
-                lambda pred_target: loss_calc(
-                    pred_target, pslabel, args.ignore_label, args.gpu),
-                pred_target1234))
-            loss_seg_target1, loss_seg_target2, loss_seg_target3, loss_seg_target4 = loss_seg_target1234
+            # # 16xNxBxWxH
+            # filtered_output_1_2_1and2_1or2_3_4_3and4_3or4 = torch.cat(list(map(
+            #     lambda max_output_ab, argmax_output_ab:
+            #         # 8xNxBxWxH
+            #         torch.cat(list(map(
+            #             # 4xNxBxWxH
+            #             lambda igc: compute_filtered_output_a_b_and_or(
+            #                 max_output_ab, argmax_output_ab,
+            #                 ignore_label=args.ignore_label, C=num_classes, N=10, ignore_class=igc),
+            #             [True, False]
+            #         ))),
+            #     max_output1234.split(2), argmax_output1234.split(2)
+            # )))
 
-            loss = torch.stack(loss_seg_target1234) @ \
-                torch.from_numpy(np.array(args.lambda_loss), device=args.gpu)
-            loss = loss / args.iter_size
-            loss.backward()
-            loss_seg_target_value1 += loss_seg_target1.detach().cpu().numpy() / \
-                args.iter_size
-            loss_seg_target_value2 += loss_seg_target2.detach().cpu().numpy() / \
-                args.iter_size
-            loss_seg_target_value3 += loss_seg_target3.detach().cpu().numpy() / \
-                args.iter_size
-            loss_seg_target_value4 += loss_seg_target4.detach().cpu().numpy() / \
-                args.iter_size
+            # # pslabel
+            # pslabel = filtered_output_1_2_1and2_1or2_3_4_3and4_3or4[
+            #     policy_index.index(args.pslabel_policy),
+            #     thr_columns.index(threshold)]
+            # gt_labelIds = load_gt(name, args.gt_dir_target,
+            #                       'train').cuda(args.gpu)
+            # gt_trainIds = label_mapping(gt_labelIds, mapping)
 
-        optimizer.step()
-        print(' \t '.join([
-            'iter = {:8d}/{:8d}'.format(i_iter, args.num_steps),
-            'loss_seg1 = {:.3f}'.format(loss_seg_value1),
-            'loss_seg2 = {:.3f}'.format(loss_seg_value2),
-            'loss_diff = {:.3f}'.format(loss_diff_value),
-            'mIoU_pslabel = {:.3f}'.format(IoUs[-1]),
-            'loss_seg_target1 = {:.3f}'.format(loss_seg_target1),
-            'loss_seg_target2 = {:.3f}'.format(loss_seg_target2),
-            'loss_seg_target3 = {:.3f}'.format(loss_seg_target3),
-            'loss_seg_target4 = {:.3f}'.format(loss_seg_target4),
-        ]))
-        if args.use_wandb:
-            wandb.log({
-                'loss_seg1': loss_seg_value1,
-                'loss_seg2': loss_seg_value2,
-                'loss_diff': loss_diff_value,
-                'loss_seg_target1 = {:.3f}': loss_seg_target1,
-                'loss_seg_target2 = {:.3f}': loss_seg_target2,
-                'loss_seg_target3 = {:.3f}': loss_seg_target3,
-                'loss_seg_target4 = {:.3f}': loss_seg_target4,
-            }.update({
-                '{}_pslabel'.format(k): IoUs[idx] for idx, k in enumerate(name_classes)
-            }), step=i_iter)
+            # for inx in range(len(mapping)):
+            #     gt_trainIds.masked_scatter_(
+            #         gt_labelIds == mapping[inx][0],
+            #         torch.full_like(
+            #             gt_labelIds, mapping[inx][1], device=args.gpu)
+            #     )
+
+            # hist = fast_hist_torch(gt_trainIds, pslabel.detach(), num_classes)
+            # IoUs = per_class_iu_torch(hist).cpu().numpy()
+            # mIoU = np.nanmean(IoUs, axis=-1)
+
+            # optimizer.step()
+            print(' \t '.join([
+                'iter = {:8d}/{:8d}'.format(i_iter, args.num_steps),
+                'loss_seg1 = {:.3f}'.format(loss_seg_value1),
+                'loss_seg2 = {:.3f}'.format(loss_seg_value2),
+                'loss_diff = {:.3f}'.format(loss_diff_value),
+                # 'mIoU_pslabel = {:.3f}'.format(mIoU),
+                # 'loss_seg_target1 = {:.3f}'.format(loss_seg_target1),
+                # 'loss_seg_target2 = {:.3f}'.format(loss_seg_target2),
+                # 'loss_seg_target3 = {:.3f}'.format(loss_seg_target3),
+                # 'loss_seg_target4 = {:.3f}'.format(loss_seg_target4),
+            ]))
+            if args.use_wandb:
+                wandb.log({
+                    'loss_seg1': loss_seg_value1,
+                    'loss_seg2': loss_seg_value2,
+                    'loss_diff': loss_diff_value,
+                    # 'loss_seg_target1': loss_seg_target1,
+                    # 'loss_seg_target2': loss_seg_target2,
+                    # 'loss_seg_target3': loss_seg_target3,
+                    # 'loss_seg_target4': loss_seg_target4,
+                    # 'mIoU_pslabel': mIoU,
+                    # }.update({
+                    #     '{}_pslabel'.format(k): IoUs[idx] for idx, k in enumerate(name_classes)
+                    # }),
+                }, step=i_iter)
 
         if i_iter >= args.num_steps_stop - 1:
             print('save model ...')
@@ -479,18 +613,8 @@ def main():
                     save_dir, 'GTA5_' + str(args.num_steps_stop)))
             torch.save(model.state_dict(), osp.join(
                 save_dir, 'GTA5_' + str(args.num_steps_stop) + '.pth'))
-
-            dfs = eval_iou(info, model, testgttargetloader, testtargetloader,
-                           interp_target_gt, args, index, columns)
-            for name_class, df in dfs.items():
-                if args.use_wandb:
-                    wandb.log({
-                        '{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
-                        for top_p in index
-                        for filter_output in columns
-                    }, step=args.num_steps_stop)
-                df.to_csv(osp.join(save_dir, 'GTA5_' + str(args.num_steps_stop) + '{}.csv'.format(name_class)),
-                          sep='\t')
+            eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
+                       testtargetloader, mapping, interp_target_gt)
             break
 
         if i_iter % args.save_pred_every == 0 and i_iter != 0:
@@ -501,19 +625,11 @@ def main():
             torch.save(model.state_dict(), osp.join(
                 save_dir, 'GTA5_' + str(i_iter) + '.pth'))
 
-            dfs = eval_iou(info, model, testgttargetloader, testtargetloader,
-                           interp_target_gt, args, index, columns,
-                           print_index=-1, print_columns=4)
-            for name_class, df in dfs.items():
-                if args.use_wandb:
-                    wandb.log({
-                        '{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
-                        for top_p in index
-                        for filter_output in columns
-                    }, step=i_iter)
-                df.to_csv(osp.join(save_dir, 'GTA5_' + str(i_iter) + '{}.csv'.format(name_class)),
-                          sep='\t')
+            eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
+                       testtargetloader, mapping, interp_target_gt)
 
 
 if __name__ == '__main__':
-    main()
+    args = get_arguments()
+
+    main(args)

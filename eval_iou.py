@@ -1,3 +1,4 @@
+from packaging import version
 import os.path as osp
 import numpy as np
 from PIL import Image
@@ -43,10 +44,17 @@ def compute_threshold_table(
         1 if ignore_class else mask == torch.arange(C, device=mask.device)
 
     # BxNx(1|C)
-    threshold_lin_idx = torch.from_numpy(
-        # BxNx(1|C)
-        np.linspace(0, mask.sum(1).cpu().numpy(), N+1, axis=1)[:, :-1]
-    ).to(mask.device).round().long()
+    if version.parse(np.__version__) >= version.parse("1.16.0"):
+        threshold_lin_idx = torch.from_numpy(
+            # BxNx(1|C)
+            np.linspace(0, mask.sum(1).cpu().numpy(), N+1, axis=1)[:, :-1]
+        ).to(mask.device).round().long()
+    else:
+        from linspace import linspace
+        threshold_lin_idx = torch.from_numpy(
+            # BxNx(1|C)
+            linspace(0, mask.sum(1).cpu().numpy(), N+1, axis=1)[:, :-1]
+        ).to(mask.device).round().long()
 
     # BxWH+1x(1|C)
     last_pad_mask = torch.cat([mask, torch.ones_like(mask[:, :1])], dim=1)
@@ -78,12 +86,17 @@ def per_class_filter_two_output(
         mask=max_output2 < per_class_threshold_output2, value=ignore_label)
     per_class_filter_output_and = per_class_filter_output1.masked_fill(
         mask=per_class_filter_output1 != per_class_filter_output2, value=ignore_label)
-    per_class_filter_output_or = per_class_filter_output_and.flatten().masked_scatter(
-        mask=per_class_filter_output1.flatten() == ignore_label,
-        source=per_class_filter_output2.flatten()[per_class_filter_output1.flatten() == ignore_label]).masked_scatter(
-            mask=per_class_filter_output2.flatten() == ignore_label,
-            source=per_class_filter_output1.flatten()[per_class_filter_output2.flatten() == ignore_label]).reshape(
-                *per_class_filter_output_and.shape)
+    f1 = per_class_filter_output1.flatten()
+    f2 = per_class_filter_output2.flatten()
+    mf1 = f1 == ignore_label
+    mf2 = f2 == ignore_label
+    per_class_filter_output_or = per_class_filter_output_and.clone().flatten()
+    per_class_filter_output_or.masked_scatter_(
+        mask=mf1, source=f2[mf1])
+    per_class_filter_output_or.masked_scatter_(
+        mask=mf2, source=f1[mf2])
+    per_class_filter_output_or = per_class_filter_output_or.reshape(
+        *per_class_filter_output_and.shape)
     return per_class_filter_output1, per_class_filter_output2, per_class_filter_output_and, per_class_filter_output_or
 
 
@@ -166,6 +179,8 @@ def compute_filtered_output_a_b_and_or(
     thr_output = thr_tb.gather(
         2,
         # [BBx(WH|WxH) -> BBx1xWH].repeat(1xNx1) -> BBxNxWH
+        torch.zeros((BB, N, WH), dtype=torch.long, device=argmax_output.device)
+        if ignore_class else
         argmax_output.reshape(BB, 1, WH).repeat(1, N, 1)
     ).reshape(BB, N, *argmax_output.shape[1:])
 

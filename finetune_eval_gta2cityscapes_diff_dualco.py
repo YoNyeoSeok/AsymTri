@@ -57,20 +57,21 @@ GT_DIRECTORY_TARGET = './data/Cityscapes/gtFine/'
 GT_LIST_PATH_TARGET_TEST = './dataset/cityscapes_list/label.txt'
 INPUT_SIZE_TARGET_GT = '2048,1024'
 
-LEARNING_RATE = 5e-5  # 2.5e-4
+LEARNING_RATE = 2.5e-4  # 2.5e-4, 5e-5
 MOMENTUM = 0.9
 NUM_CLASSES = 19
 # source: 24966, target: 2975
-NUM_STEPS = 30000  # 250000
-NUM_STEPS_START = 0
-NUM_STEPS_STOP = 18000  # 150000  # early stopping (6 epoch)
+NUM_STEPS = 250000  # 250000, 30000
+NUM_STEPS_START = 1
+NUM_STEPS_STOP = 150000  # 150000, 18000  # early stopping (6 epoch)
 POWER = 0.9
 RANDOM_SEED = 1234
 RESTORE_FROM = 'http://vllab.ucmerced.edu/ytsai/CVPR18/DeepLab_resnet_pretrained_init-f81d91e8.pth'
 # RESTORE_FROM = './model/gta_src.pth'
+RESTORE_FROM_PSLABEL = '9ab2hb8f/GTA5_70000.pth'
 SAVE_NUM_IMAGES = 2
-SAVE_PRED_EVERY = 100  # 600  # 5000
-SNAPSHOT_DIR = './snapshots_dualco/'
+SAVE_PRED_EVERY = 100  # 5000, 600
+SNAPSHOT_DIR = './snapshots_diff_dualco/'
 WEIGHT_DECAY = 0.001
 
 LAMBDA_LOSS = [.0, .0, 1., .0]  # 0.005
@@ -168,6 +169,8 @@ def get_arguments():
                         help="Random seed to have reproducible results.")
     parser.add_argument("--restore-from", type=str, default=RESTORE_FROM,
                         help="Where restore model parameters from.")
+    parser.add_argument("--restore-from-pslabel", type=str, default=RESTORE_FROM_PSLABEL,
+                        help="Where restore pslabel model parameters from.")
     parser.add_argument("--save-num-images", type=int, default=SAVE_NUM_IMAGES,
                         help="How many images to save.")
     parser.add_argument("--save-pred-every", type=int, default=SAVE_PRED_EVERY,
@@ -212,6 +215,25 @@ def adjust_learning_rate_D(optimizer, i_iter):
     optimizer.param_groups[0]['lr'] = lr
     if len(optimizer.param_groups) > 1:
         optimizer.param_groups[1]['lr'] = lr * 10
+
+
+def save_target_pred_max_argmax(model, targetloader, interp_target_gt, save_dir):
+    model.eval()
+    with torch.no_grad():
+        for ind, batch in enumerate(targetloader):
+            images, _, name = batch
+            images = images.cuda(args.gpu)
+
+            # 4xBxCxWxH
+            output1234 = torch.cat(model(images))
+            # 4xBxCxWxH
+            output1234 = interp_target_gt(output1234)
+            output1234 = output1234.reshape(4, -1, *output1234.shape[1:])
+            for n, o1234 in zip(name, output1234.split(1, dim=1)):
+                # [4xCxWxH].max(1) -> (4xWxH), (4xWxH)
+                max_argmax_o1234 = torch.stack(o1234.max(1))
+                save_name = osp.splitext(n)[0]+'.pth'
+                torch.save(max_argmax_o1234, osp.join(save_name, save_name))
 
 
 def eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
@@ -279,41 +301,33 @@ def eval_model(model, policy_index, thr_columns, threshold, num_classes, name_cl
             mIoU = np.nanmean(IoUs.cpu().numpy(), -1)
             ct = time.time()-t
 
-            t = time.time()
-            dfs = {}
-            for ind_class in range(num_classes):
-                name_class = name_classes[ind_class]
-                df = pd.DataFrame(IoUs[:, :, ind_class],
-                                  index=policy_index, columns=thr_columns)
-                dfs.update({name_class: df})
-            dfs.update({'mIoU': mIoU})
-            dt = time.time()-t
-
             print('[{:4d}/{:4d}]===> {} ({}, {}):\t {:.2f}'.format(
                 ind, len(testtargetloader), 'mIoU', args.pslabel_policy, threshold,
                 100*mIoU[policy_index.index(args.pslabel_policy), thr_columns.index(threshold)]))
-            tt = at+bt+ct+dt
-            # print(at+bt+ct+dt, at/tt, bt/tt, ct/tt, dt/tt)
+            tt = at+bt+ct
+            # print(at+bt+ct, at/tt, bt/tt, ct/tt)
 
-            del filtered_output_1_2_1and2_1or2_3_4_3and4_3or4, IoUs, mIoU
-            torch.cuda.empty_cache()
-            break
+            # del filtered_output_1_2_1and2_1or2_3_4_3and4_3or4, IoUs, mIoU
+            # torch.cuda.empty_cache()
+            # break
+        dfs = {}
+        for ind_class in range(num_classes):
+            name_class = name_classes[ind_class]
+            df = pd.DataFrame(IoUs[:, :, ind_class],
+                              index=policy_index, columns=thr_columns)
+            dfs.update({name_class: df})
+        df = pd.DataFrame(mIoU, index=policy_index, columns=thr_columns)
+        dfs.update({'mIoU': df})
 
-    if args.use_wandb:
-        for name_class, df in dfs.items():
-            wandb.log({
-                '{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
-                for top_p in policy_index
-                for filter_output in thr_columns
-            }, step=0)
+    return dfs
 
 
 def main(args):
     """Create the model and start the training."""
 
     if args.use_wandb:
-        wandb.init(project='AsymTri_Pipeline_Diff',
-                   name='SourceOnly', dir='./', config=args)
+        wandb.init(project='AsymTri_Pipeline_Diff_DualCo',
+                   name='Round1', dir='./', config=args)
 
     w, h = map(int, args.input_size.split(','))
     input_size = (w, h)
@@ -338,12 +352,15 @@ def main(args):
     if 'DeepLab' in args.model:
         if args.model == 'DeepLabDualCo':
             model = DeeplabDualCo(num_classes=args.num_classes)
+            pslabel_model = DeeplabDualCo(num_classes=args.num_classes)
         else:
             raise NotImplementedError(
                 "wrong model name: {}".format(args.model))
 
         model.train()
         model.cuda(args.gpu)
+        pslabel_model.eval()
+        pslabel_model.cuda(args.gpu)
 
         if args.restore_from[:4] == 'http':
             saved_state_dict = model_zoo.load_url(
@@ -370,6 +387,12 @@ def main(args):
         saved_state_dict.update([
             (k, v) for k, v in model.state_dict().items() if k not in saved_state_dict])
         model.load_state_dict(saved_state_dict)
+
+        pslabel_state_dict = torch.load(
+            args.restore_from_pslabel, map_location=torch.device(args.gpu))
+        pslabel_state_dict.update([
+            (k, v) for k, v in model.state_dict().items() if k not in pslabel_state_dict])
+        pslabel_model.load_state_dict(pslabel_state_dict)
     else:
         raise NotImplementedError(
             "wrong model name: {}".format(args.model))
@@ -428,16 +451,28 @@ def main(args):
                     'per_class_3', 'per_class_4', 'per_class_3and4', 'per_class_3or4',
                     ]
 
-    print('before eval')
-    print(torch.cuda.memory_summary(args.gpu))
-    eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
-               testtargetloader, mapping, interp_target_gt)
-    print('after eval')
-    print(torch.cuda.memory_summary(args.gpu))
+    dfs = eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
+                     testtargetloader, mapping, interp_target_gt)
+    if args.use_wandb:
+        for name_class, df in dfs.items():
+            wandb.log({
+                '{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
+                for top_p in policy_index
+                for filter_output in thr_columns
+            }, step=0)
+    pslabel_dfs = eval_model(pslabel_model, policy_index, thr_columns, threshold, num_classes, name_classes,
+                             testtargetloader, mapping, interp_target_gt)
+    if args.use_wandb:
+        for name_class, df in pslabel_dfs.items():
+            wandb.log({
+                'pslabel_{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
+                for top_p in policy_index
+                for filter_output in thr_columns
+            }, step=0)
+
     params = model.optim_parameters(args)
     optimizer = optim.SGD(params,
                           lr=args.learning_rate, momentum=args.momentum, weight_decay=args.weight_decay)
-    optimizer.zero_grad()
 
     for i_iter in range(args.num_steps_start, args.num_steps):
         model.train()
@@ -453,8 +488,8 @@ def main(args):
         adjust_learning_rate(optimizer, i_iter)
 
         for sub_i in range(args.iter_size):
-            optimizer.zero_grad()
             # train with source
+            optimizer.zero_grad()
             _, batch = next(trainloader_iter)
             images, labels, _, _ = batch
             images = Variable(images).cuda(args.gpu)
@@ -483,127 +518,149 @@ def main(args):
             loss_seg_value2 += loss_seg2.detach().cpu().numpy() / args.iter_size
             loss_diff_value += loss_diff.detach().cpu().numpy() / args.iter_size
             optimizer.step()
-            optimizer.zero_grad()
 
-            del images, output1234, pred1234, loss_seg1, loss_seg2, loss_diff, loss
-            torch.cuda.empty_cache()
+            # del images, output1234, pred1234, loss_seg1, loss_seg2, loss_diff, loss
+            # torch.cuda.empty_cache()
+
             # train with target
-            # _, batch = next(targetloader_iter)
-            # images, _, name = batch
-            # images = Variable(images).cuda(args.gpu)
+            optimizer.zero_grad()
+            _, batch = next(targetloader_iter)
+            images, _, name = batch
+            images = Variable(images).cuda(args.gpu)
 
-            # # 4BxCxWxH
-            # output1234 = torch.cat(model(images))
-            # # 4xBxCxWxH
-            # target1234 = interp_target(output1234)
-            # target1234 = target1234.reshape(4, -1, *target1234.shape[1:])
-            # # 4xBxWxH
-            # max_output1234, argmax_output1234 = target1234.max(2)
+            pslabel_model.eval()
+            with torch.no_grad():
+                # 4BxCxWxH
+                ps_output1234 = torch.cat(pslabel_model(images))
+                # 4xBxCxWxH
+                ps_target1234 = interp_target(ps_output1234)
+                ps_target1234 = ps_target1234.reshape(
+                    4, -1, *ps_target1234.shape[1:])
+                # 4xBxWxH
+                max_output1234, argmax_output1234 = ps_target1234.max(2)
 
-            # # 16xNxBxWxH
-            # filtered_output_1_2_1and2_1or2_3_4_3and4_3or4 = torch.cat(list(map(
-            #     lambda max_output_ab, argmax_output_ab:
-            #         # 8xNxBxWxH
-            #         torch.cat(list(map(
-            #             # 4xNxBxWxH
-            #             lambda igc: compute_filtered_output_a_b_and_or(
-            #                 max_output_ab, argmax_output_ab,
-            #                 ignore_label=args.ignore_label, C=num_classes, N=10, ignore_class=igc),
-            #             [True, False]
-            #         ))),
-            #     max_output1234.split(2), argmax_output1234.split(2)
-            # )))
-            # # pslabel
-            # pslabel = filtered_output_1_2_1and2_1or2_3_4_3and4_3or4[
-            #     policy_index.index(args.pslabel_policy),
-            #     thr_columns.index(threshold)]
+                # 16xNxBxWxH
+                filtered_output_1_2_1and2_1or2_3_4_3and4_3or4 = torch.cat(list(map(
+                    lambda max_output_ab, argmax_output_ab:
+                        # 8xNxBxWxH
+                        torch.cat(list(map(
+                            # 4xNxBxWxH
+                            lambda igc: compute_filtered_output_a_b_and_or(
+                                max_output_ab, argmax_output_ab,
+                                ignore_label=args.ignore_label, C=num_classes, N=10, ignore_class=igc),
+                            [True, False]
+                        ))),
+                    max_output1234.split(2), argmax_output1234.split(2)
+                )))
+                # pslabel
+                pslabel = filtered_output_1_2_1and2_1or2_3_4_3and4_3or4[
+                    policy_index.index(args.pslabel_policy),
+                    thr_columns.index(threshold)]
 
-            # loss_seg_target1234 = list(map(
-            #     lambda pred_target: loss_calc(
-            #         pred_target, pslabel, args.ignore_label, args.gpu),
-            #     target1234))
-            # loss_seg_target1, loss_seg_target2, loss_seg_target3, loss_seg_target4 = loss_seg_target1234
+            output1234 = torch.cat(model(images))
+            # 4xBxCxWxH
+            target1234 = interp_target(output1234)
+            target1234 = target1234.reshape(4, -1, *target1234.shape[1:])
 
-            # loss = torch.stack(loss_seg_target1234) @ \
-            #     torch.from_numpy(np.array(args.lambda_loss)).to(
-            #         dtype=loss_seg_target1.dtype, device=args.gpu)
-            # loss = loss / args.iter_size
-            # loss.backward()
-            # loss_seg_target_value1 += loss_seg_target1.detach().cpu().numpy() / \
-            #     args.iter_size
-            # loss_seg_target_value2 += loss_seg_target2.detach().cpu().numpy() / \
-            #     args.iter_size
-            # loss_seg_target_value3 += loss_seg_target3.detach().cpu().numpy() / \
-            #     args.iter_size
-            # loss_seg_target_value4 += loss_seg_target4.detach().cpu().numpy() / \
-            #     args.iter_size
+            loss_seg_target1234 = list(map(
+                lambda pred_target: loss_calc(
+                    pred_target, pslabel, args.ignore_label, args.gpu),
+                target1234))
+            loss_seg_target1, loss_seg_target2, loss_seg_target3, loss_seg_target4 = loss_seg_target1234
+
+            loss = torch.stack(loss_seg_target1234) @ \
+                torch.from_numpy(np.array(args.lambda_loss)).to(
+                    dtype=loss_seg_target1.dtype, device=args.gpu)
+            loss = loss / args.iter_size
+            loss.backward()
+            loss_seg_target_value1 += loss_seg_target1.detach().cpu().numpy() / \
+                args.iter_size
+            loss_seg_target_value2 += loss_seg_target2.detach().cpu().numpy() / \
+                args.iter_size
+            loss_seg_target_value3 += loss_seg_target3.detach().cpu().numpy() / \
+                args.iter_size
+            loss_seg_target_value4 += loss_seg_target4.detach().cpu().numpy() / \
+                args.iter_size
+
+            optimizer.step()
+
+            gt_labelIds = load_gt(name, args.gt_dir_target,
+                                  'train').cuda(args.gpu)
+            gt_trainIds = label_mapping(gt_labelIds, mapping)
 
             # torch.cuda.empty_cache()
-            # 4BxCxWxH
-            # target1234 = interp_target_gt(output1234)
-            # target1234 = target1234.reshape(4, -1, *target1234.shape[1:])
-            # # 4xBxWxH
-            # max_output1234, argmax_output1234 = target1234.max(2)
+            with torch.no_grad():
+                # 4BxCxWxH
+                ps_target1234 = interp_target_gt(ps_output1234)
+                ps_target1234 = ps_target1234.reshape(
+                    4, -1, *ps_target1234.shape[1:])
+                # 4xBxWxH
+                max_output1234, argmax_output1234 = ps_target1234.max(2)
 
-            # # 16xNxBxWxH
-            # filtered_output_1_2_1and2_1or2_3_4_3and4_3or4 = torch.cat(list(map(
-            #     lambda max_output_ab, argmax_output_ab:
-            #         # 8xNxBxWxH
-            #         torch.cat(list(map(
-            #             # 4xNxBxWxH
-            #             lambda igc: compute_filtered_output_a_b_and_or(
-            #                 max_output_ab, argmax_output_ab,
-            #                 ignore_label=args.ignore_label, C=num_classes, N=10, ignore_class=igc),
-            #             [True, False]
-            #         ))),
-            #     max_output1234.split(2), argmax_output1234.split(2)
-            # )))
+                # # 16xNxBxWxH
+                # filtered_output_1_2_1and2_1or2_3_4_3and4_3or4 = torch.cat(list(map(
+                #     lambda max_output_ab, argmax_output_ab:
+                #         # 8xNxBxWxH
+                #         torch.cat(list(map(
+                #             # 4xNxBxWxH
+                #             lambda igc: compute_filtered_output_a_b_and_or(
+                #                 max_output_ab, argmax_output_ab,
+                #                 ignore_label=args.ignore_label, C=num_classes, N=10, ignore_class=igc),
+                #             [True, False]
+                #         ))),
+                #     max_output1234.split(2), argmax_output1234.split(2)
+                # )))
 
-            # # pslabel
-            # pslabel = filtered_output_1_2_1and2_1or2_3_4_3and4_3or4[
-            #     policy_index.index(args.pslabel_policy),
-            #     thr_columns.index(threshold)]
-            # gt_labelIds = load_gt(name, args.gt_dir_target,
-            #                       'train').cuda(args.gpu)
-            # gt_trainIds = label_mapping(gt_labelIds, mapping)
+                # # pslabel
+                # pslabel = filtered_output_1_2_1and2_1or2_3_4_3and4_3or4[
+                #     policy_index.index(args.pslabel_policy),
+                #     thr_columns.index(threshold)]
 
-            # for inx in range(len(mapping)):
-            #     gt_trainIds.masked_scatter_(
-            #         gt_labelIds == mapping[inx][0],
-            #         torch.full_like(
-            #             gt_labelIds, mapping[inx][1], device=args.gpu)
-            #     )
+                # hist = fast_hist_batch(
+                #     gt_trainIds.flatten(-2), argmax_output1234.flatten(-2), num_classes)
+                hist = torch.stack(list(map(
+                    lambda pred_batch: torch.stack(list(map(
+                        lambda gt, pred_batch: fast_hist_torch(
+                            gt, pred_batch, num_classes),
+                        gt_trainIds, pred_batch
+                    ))),
+                    argmax_output1234.flatten(0, -4)
+                ))).reshape(*argmax_output1234.shape[:-2], num_classes, num_classes).sum(2)
+                IoUs = per_class_iu_batch(hist).cpu().numpy()
+                mIoU = np.nanmean(IoUs, axis=-1)
 
-            # hist = fast_hist_torch(gt_trainIds, pslabel.detach(), num_classes)
-            # IoUs = per_class_iu_torch(hist).cpu().numpy()
-            # mIoU = np.nanmean(IoUs, axis=-1)
-
-            # optimizer.step()
             print(' \t '.join([
                 'iter = {:8d}/{:8d}'.format(i_iter, args.num_steps),
                 'loss_seg1 = {:.3f}'.format(loss_seg_value1),
                 'loss_seg2 = {:.3f}'.format(loss_seg_value2),
                 'loss_diff = {:.3f}'.format(loss_diff_value),
-                # 'mIoU_pslabel = {:.3f}'.format(mIoU),
-                # 'loss_seg_target1 = {:.3f}'.format(loss_seg_target1),
-                # 'loss_seg_target2 = {:.3f}'.format(loss_seg_target2),
-                # 'loss_seg_target3 = {:.3f}'.format(loss_seg_target3),
-                # 'loss_seg_target4 = {:.3f}'.format(loss_seg_target4),
+                'mIoU_target1 = {:.3f}'.format(mIoU[0]),
+                'mIoU_target2 = {:.3f}'.format(mIoU[1]),
+                'mIoU_target3 = {:.3f}'.format(mIoU[2]),
+                'mIoU_target4 = {:.3f}'.format(mIoU[3]),
+                'loss_seg_target1 = {:.3f}'.format(loss_seg_target1),
+                'loss_seg_target2 = {:.3f}'.format(loss_seg_target2),
+                'loss_seg_target3 = {:.3f}'.format(loss_seg_target3),
+                'loss_seg_target4 = {:.3f}'.format(loss_seg_target4),
             ]))
             if args.use_wandb:
                 wandb.log({
                     'loss_seg1': loss_seg_value1,
                     'loss_seg2': loss_seg_value2,
                     'loss_diff': loss_diff_value,
-                    # 'loss_seg_target1': loss_seg_target1,
-                    # 'loss_seg_target2': loss_seg_target2,
-                    # 'loss_seg_target3': loss_seg_target3,
-                    # 'loss_seg_target4': loss_seg_target4,
-                    # 'mIoU_pslabel': mIoU,
-                    # }.update({
-                    #     '{}_pslabel'.format(k): IoUs[idx] for idx, k in enumerate(name_classes)
-                    # }),
+                    'loss_seg_target1': loss_seg_target1,
+                    'loss_seg_target2': loss_seg_target2,
+                    'loss_seg_target3': loss_seg_target3,
+                    'loss_seg_target4': loss_seg_target4,
+                    'mIoU_target1': mIoU[0],
+                    'mIoU_target2': mIoU[1],
+                    'mIoU_target3': mIoU[2],
+                    'mIoU_target4': mIoU[3],
                 }, step=i_iter)
+                wandb.log({
+                    '{}_IoU_target{}'.format(k, i+1): IoUs[i, idx] for idx, k in enumerate(name_classes) for i in range(4)
+                }, step=i_iter)
+                # }, step=i_iter)
 
         if i_iter >= args.num_steps_stop - 1:
             print('save model ...')
@@ -613,8 +670,24 @@ def main(args):
                     save_dir, 'GTA5_' + str(args.num_steps_stop)))
             torch.save(model.state_dict(), osp.join(
                 save_dir, 'GTA5_' + str(args.num_steps_stop) + '.pth'))
-            eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
-                       testtargetloader, mapping, interp_target_gt)
+            dfs = eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
+                             testtargetloader, mapping, interp_target_gt)
+            if args.use_wandb:
+                for name_class, df in dfs.items():
+                    wandb.log({
+                        '{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
+                        for top_p in policy_index
+                        for filter_output in thr_columns
+                    }, step=int(args.num_steps_stop))
+            if args.use_wandb:
+                for name_class, df in pslabel_dfs.items():
+                    wandb.log({
+                        'pslabel_{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
+                        for top_p in policy_index
+                        for filter_output in thr_columns
+                    }, step=int(args.num_steps_stop))
+            # save_target_pred_max_argmax(model, targetloader, interp_target_gt,
+            #                             osp.join(save_dir, 'GTA5_' + str(args.num_steps_stop)))
             break
 
         if i_iter % args.save_pred_every == 0 and i_iter != 0:
@@ -625,8 +698,24 @@ def main(args):
             torch.save(model.state_dict(), osp.join(
                 save_dir, 'GTA5_' + str(i_iter) + '.pth'))
 
-            eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
-                       testtargetloader, mapping, interp_target_gt)
+            dfs = eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
+                             testtargetloader, mapping, interp_target_gt)
+            if args.use_wandb:
+                for name_class, df in dfs.items():
+                    wandb.log({
+                        '{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
+                        for top_p in policy_index
+                        for filter_output in thr_columns
+                    }, step=i_iter)
+            if args.use_wandb:
+                for name_class, df in pslabel_dfs.items():
+                    wandb.log({
+                        'pslabel_{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
+                        for top_p in policy_index
+                        for filter_output in thr_columns
+                    }, step=i_iter)
+            # save_target_pred_max_argmax(model, targetloader, interp_target_gt,
+            #                             osp.join(save_dir, 'GTA5_' + str(i_iter)))
 
 
 if __name__ == '__main__':

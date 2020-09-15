@@ -181,6 +181,8 @@ def get_arguments():
                         help="Regularisation parameter for L2-loss.")
     parser.add_argument("--gpu", type=int, default=0,
                         help="choose gpu device.")
+    parser.add_argument("--gpu-eval", type=int, default=1,
+                        help="choose gpu device for eval.")
     # parser.add_argument("--set", type=str, default=SET,
     #                     help="choose adaptation set.")
     parser.add_argument('--use-wandb', action='store_true')
@@ -237,16 +239,17 @@ def save_target_pred_max_argmax(model, targetloader, interp_target_gt, save_dir)
 
 
 def eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
-               testtargetloader, mapping, interp_target_gt):
+               testtargetloader, mapping, interp_target_gt, gpu):
+    model.cuda(gpu)
     model.eval()
     hist = torch.zeros(
-        (len(policy_index), len(thr_columns), num_classes, num_classes)).cuda(args.gpu)
+        (len(policy_index), len(thr_columns), num_classes, num_classes)).cuda(gpu)
     with torch.no_grad():
         for ind, batch in enumerate(testtargetloader):
             images, _, name = batch
-            images = images.cuda(args.gpu)
+            images = images.cuda(gpu)
             gt_labelIds = load_gt(name, args.gt_dir_target,
-                                  'val').cuda(args.gpu)
+                                  'val').cuda(gpu)
             gt_trainIds = label_mapping(gt_labelIds, mapping)
 
             # 4BxCxWxH
@@ -309,7 +312,7 @@ def eval_model(model, policy_index, thr_columns, threshold, num_classes, name_cl
 
             # del filtered_output_1_2_1and2_1or2_3_4_3and4_3or4, IoUs, mIoU
             # torch.cuda.empty_cache()
-            # break
+            break
         dfs = {}
         for ind_class in range(num_classes):
             name_class = name_classes[ind_class]
@@ -452,7 +455,7 @@ def main(args):
                     ]
 
     dfs = eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
-                     testtargetloader, mapping, interp_target_gt)
+                     testtargetloader, mapping, interp_target_gt, args.gpu_eval)
     if args.use_wandb:
         for name_class, df in dfs.items():
             wandb.log({
@@ -461,7 +464,7 @@ def main(args):
                 for filter_output in thr_columns
             }, step=0)
     pslabel_dfs = eval_model(pslabel_model, policy_index, thr_columns, threshold, num_classes, name_classes,
-                             testtargetloader, mapping, interp_target_gt)
+                             testtargetloader, mapping, interp_target_gt, args.gpu_eval)
     if args.use_wandb:
         for name_class, df in pslabel_dfs.items():
             wandb.log({
@@ -476,6 +479,9 @@ def main(args):
 
     for i_iter in range(args.num_steps_start, args.num_steps):
         model.train()
+        model.cuda(args.gpu)
+        pslabel_model.eval()
+        pslabel_model.cuda(args.gpu)
 
         loss_seg_value1 = 0
         loss_seg_value2 = 0
@@ -671,7 +677,7 @@ def main(args):
             torch.save(model.state_dict(), osp.join(
                 save_dir, 'GTA5_' + str(args.num_steps_stop) + '.pth'))
             dfs = eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
-                             testtargetloader, mapping, interp_target_gt)
+                             testtargetloader, mapping, interp_target_gt, args.gpu_eval)
             if args.use_wandb:
                 for name_class, df in dfs.items():
                     wandb.log({
@@ -699,7 +705,7 @@ def main(args):
                 save_dir, 'GTA5_' + str(i_iter) + '.pth'))
 
             dfs = eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
-                             testtargetloader, mapping, interp_target_gt)
+                             testtargetloader, mapping, interp_target_gt, args.gpu_eval)
             if args.use_wandb:
                 for name_class, df in dfs.items():
                     wandb.log({

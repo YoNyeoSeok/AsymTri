@@ -189,7 +189,7 @@ def get_arguments():
     return parser.parse_args()
 
 
-def loss_calc(pred, label, ignore_label, gpu):
+def loss_calc(input, label, ignore_label, gpu):
     """
     This function returns cross entropy loss for semantic segmentation
     """
@@ -198,7 +198,7 @@ def loss_calc(pred, label, ignore_label, gpu):
     label = Variable(label.long()).cuda(gpu)
     criterion = CrossEntropy2d(ignore_label=ignore_label).cuda(gpu)
 
-    return criterion(pred, label)
+    return criterion(input, label)
 
 
 def lr_poly(base_lr, iter, max_iter, power):
@@ -255,14 +255,15 @@ def eval_model(model, policy_index, thr_columns, threshold, num_classes, name_cl
             # 4BxCxWxH
             output1234 = torch.cat(model(images))
             # 4xBxCxWxH
-            output1234 = interp_target_gt(output1234)
-            output1234 = output1234.reshape(4, -1, *output1234.shape[1:])
+            poten1234 = interp_target_gt(output1234)
+            poten1234 = poten1234.reshape(4, -1, *poten1234.shape[1:])
+            prob1234 = F.softmax(poten1234, dim=-3)
             # 4xBxWxH
-            max_output1234, argmax_output1234 = output1234.max(2)
+            confid1234, pred1234 = prob1234.max(2)
 
             t = time.time()
             # 16xNxBxWxH
-            filtered_output_1_2_1and2_1or2_3_4_3and4_3or4 = torch.cat(list(map(
+            filtered_pred_1_2_1and2_1or2_3_4_3and4_3or4 = torch.cat(list(map(
                 lambda max_output_ab, argmax_output_ab:
                     # 8xNxBxWxH
                     torch.cat(list(map(
@@ -272,7 +273,7 @@ def eval_model(model, policy_index, thr_columns, threshold, num_classes, name_cl
                             ignore_label=args.ignore_label, C=num_classes, N=10, ignore_class=igc),
                         [True, False]
                     ))),
-                max_output1234.split(2), argmax_output1234.split(2)
+                confid1234.split(2), pred1234.split(2)
             )))
             at = time.time()-t
 
@@ -285,15 +286,15 @@ def eval_model(model, policy_index, thr_columns, threshold, num_classes, name_cl
                         gt, pred_batch, num_classes),
                     gt_trainIds, pred_batch
                 ))),
-                filtered_output_1_2_1and2_1or2_3_4_3and4_3or4.flatten(0, -4)
-            ))).reshape(*filtered_output_1_2_1and2_1or2_3_4_3and4_3or4.shape[:-2], num_classes, num_classes).sum(2)
+                filtered_pred_1_2_1and2_1or2_3_4_3and4_3or4.flatten(0, -4)
+            ))).reshape(*filtered_pred_1_2_1and2_1or2_3_4_3and4_3or4.shape[:-2], num_classes, num_classes).sum(2)
             # WHY BATCH IS MORE SLOWER?
             # [16xNxBx19x19].sum(2) -> 16xNx19x19
             # hist += fast_hist_batch(
             #     # [BxWxH].flatten(-2) -> BxWH
             #     gt_trainIds.flatten(-2),
             #     # [16xNxBxWxH].flatten(-2) -> 16xNxBxWH
-            #     filtered_output_1_2_1and2_1or2_3_4_3and4_3or4.flatten(
+            #     filtered_pred_1_2_1and2_1or2_3_4_3and4_3or4.flatten(
             #         -2),
             #     num_classes).sum(2)
             bt = time.time()-t
@@ -310,7 +311,7 @@ def eval_model(model, policy_index, thr_columns, threshold, num_classes, name_cl
             tt = at+bt+ct
             # print(at+bt+ct, at/tt, bt/tt, ct/tt)
 
-            # del filtered_output_1_2_1and2_1or2_3_4_3and4_3or4, IoUs, mIoU
+            # del filtered_pred_1_2_1and2_1or2_3_4_3and4_3or4, IoUs, mIoU
             # torch.cuda.empty_cache()
             break
         dfs = {}
@@ -355,15 +356,15 @@ def main(args):
     if 'DeepLab' in args.model:
         if args.model == 'DeepLabDualCo':
             model = DeeplabDualCo(num_classes=args.num_classes)
-            pslabel_model = DeeplabDualCo(num_classes=args.num_classes)
+            prev_model = DeeplabDualCo(num_classes=args.num_classes)
         else:
             raise NotImplementedError(
                 "wrong model name: {}".format(args.model))
 
         model.train()
         model.cuda(args.gpu)
-        pslabel_model.eval()
-        pslabel_model.cuda(args.gpu)
+        prev_model.eval()
+        prev_model.cuda(args.gpu)
 
         if args.restore_from[:4] == 'http':
             saved_state_dict = model_zoo.load_url(
@@ -391,11 +392,11 @@ def main(args):
             (k, v) for k, v in model.state_dict().items() if k not in saved_state_dict])
         model.load_state_dict(saved_state_dict)
 
-        pslabel_state_dict = torch.load(
+        prev_state_dict = torch.load(
             args.restore_from_pslabel, map_location=torch.device(args.gpu))
-        pslabel_state_dict.update([
-            (k, v) for k, v in model.state_dict().items() if k not in pslabel_state_dict])
-        pslabel_model.load_state_dict(pslabel_state_dict)
+        prev_state_dict.update([
+            (k, v) for k, v in model.state_dict().items() if k not in prev_state_dict])
+        prev_model.load_state_dict(prev_state_dict)
     else:
         raise NotImplementedError(
             "wrong model name: {}".format(args.model))
@@ -463,7 +464,7 @@ def main(args):
                 for top_p in policy_index
                 for filter_output in thr_columns
             }, step=0)
-    pslabel_dfs = eval_model(pslabel_model, policy_index, thr_columns, threshold, num_classes, name_classes,
+    pslabel_dfs = eval_model(prev_model, policy_index, thr_columns, threshold, num_classes, name_classes,
                              testtargetloader, mapping, interp_target_gt, args.gpu_eval)
     if args.use_wandb:
         for name_class, df in pslabel_dfs.items():
@@ -480,8 +481,8 @@ def main(args):
     for i_iter in range(args.num_steps_start, args.num_steps):
         model.train()
         model.cuda(args.gpu)
-        pslabel_model.eval()
-        pslabel_model.cuda(args.gpu)
+        prev_model.eval()
+        prev_model.cuda(args.gpu)
 
         loss_seg_value1 = 0
         loss_seg_value2 = 0
@@ -502,15 +503,17 @@ def main(args):
 
             # 4BxCxWxH
             output1234 = torch.cat(model(images))
+            # 4BxCxWxH
+            poten1234 = interp(output1234)
             # 4xBxCxWxH
-            pred1234 = interp(output1234)
-            pred1234 = pred1234.reshape(4, -1, *pred1234.shape[1:])
+            poten1234 = poten1234.reshape(4, -1, *poten1234.shape[1:])
+            # pred1234 = F.softmax(poten1234, -3)
             # 4xBxWxH
 
             loss_seg1, loss_seg2, _, _ = list(map(
-                lambda pred: loss_calc(
-                    pred, labels, args.ignore_label, args.gpu),
-                pred1234))
+                lambda poten: loss_calc(
+                    poten, labels, args.ignore_label, args.gpu),
+                poten1234))
 
             loss_diff = model.weight_diff(
                 orth=args.orth, norm=args.norm)
@@ -534,19 +537,21 @@ def main(args):
             images, _, name = batch
             images = Variable(images).cuda(args.gpu)
 
-            pslabel_model.eval()
+            prev_model.eval()
             with torch.no_grad():
                 # 4BxCxWxH
-                ps_output1234 = torch.cat(pslabel_model(images))
+                pm_output1234 = torch.cat(prev_model(images))
+                # 4BxCxWxH
+                pm_poten1234 = interp_target(pm_output1234)
                 # 4xBxCxWxH
-                ps_target1234 = interp_target(ps_output1234)
-                ps_target1234 = ps_target1234.reshape(
-                    4, -1, *ps_target1234.shape[1:])
+                pm_poten1234 = pm_poten1234.reshape(
+                    4, -1, *pm_poten1234.shape[1:])
+                pm_prob1234 = F.softmax(pm_poten1234, -3)
                 # 4xBxWxH
-                max_output1234, argmax_output1234 = ps_target1234.max(2)
+                pm_confid1234, pm_pred1234 = pm_prob1234.max(2)
 
                 # 16xNxBxWxH
-                filtered_output_1_2_1and2_1or2_3_4_3and4_3or4 = torch.cat(list(map(
+                filtered_pm_pred_1_2_1and2_1or2_3_4_3and4_3or4 = torch.cat(list(map(
                     lambda max_output_ab, argmax_output_ab:
                         # 8xNxBxWxH
                         torch.cat(list(map(
@@ -556,22 +561,22 @@ def main(args):
                                 ignore_label=args.ignore_label, C=num_classes, N=10, ignore_class=igc),
                             [True, False]
                         ))),
-                    max_output1234.split(2), argmax_output1234.split(2)
+                    pm_confid1234.split(2), pm_pred1234.split(2)
                 )))
-                # pslabel
-                pslabel = filtered_output_1_2_1and2_1or2_3_4_3and4_3or4[
+                # pslabel = pm_pred (prev model filtered pred)
+                pslabel = filtered_pm_pred_1_2_1and2_1or2_3_4_3and4_3or4[
                     policy_index.index(args.pslabel_policy),
                     thr_columns.index(threshold)]
 
             output1234 = torch.cat(model(images))
             # 4xBxCxWxH
-            target1234 = interp_target(output1234)
-            target1234 = target1234.reshape(4, -1, *target1234.shape[1:])
+            poten1234 = interp_target(output1234)
+            poten1234 = poten1234.reshape(4, -1, *poten1234.shape[1:])
 
             loss_seg_target1234 = list(map(
                 lambda pred_target: loss_calc(
                     pred_target, pslabel, args.ignore_label, args.gpu),
-                target1234))
+                poten1234))
             loss_seg_target1, loss_seg_target2, loss_seg_target3, loss_seg_target4 = loss_seg_target1234
 
             loss = torch.stack(loss_seg_target1234) @ \
@@ -597,30 +602,12 @@ def main(args):
             # torch.cuda.empty_cache()
             with torch.no_grad():
                 # 4BxCxWxH
-                ps_target1234 = interp_target_gt(ps_output1234)
-                ps_target1234 = ps_target1234.reshape(
-                    4, -1, *ps_target1234.shape[1:])
+                pm_poten1234 = interp_target_gt(pm_output1234)
+                # 4xBxCxWxH
+                pm_poten1234 = pm_poten1234.reshape(
+                    4, -1, *pm_poten1234.shape[1:])
                 # 4xBxWxH
-                max_output1234, argmax_output1234 = ps_target1234.max(2)
-
-                # # 16xNxBxWxH
-                # filtered_output_1_2_1and2_1or2_3_4_3and4_3or4 = torch.cat(list(map(
-                #     lambda max_output_ab, argmax_output_ab:
-                #         # 8xNxBxWxH
-                #         torch.cat(list(map(
-                #             # 4xNxBxWxH
-                #             lambda igc: compute_filtered_output_a_b_and_or(
-                #                 max_output_ab, argmax_output_ab,
-                #                 ignore_label=args.ignore_label, C=num_classes, N=10, ignore_class=igc),
-                #             [True, False]
-                #         ))),
-                #     max_output1234.split(2), argmax_output1234.split(2)
-                # )))
-
-                # # pslabel
-                # pslabel = filtered_output_1_2_1and2_1or2_3_4_3and4_3or4[
-                #     policy_index.index(args.pslabel_policy),
-                #     thr_columns.index(threshold)]
+                pred1234 = pm_poten1234.argmax(2)
 
                 # hist = fast_hist_batch(
                 #     gt_trainIds.flatten(-2), argmax_output1234.flatten(-2), num_classes)
@@ -630,25 +617,22 @@ def main(args):
                             gt, pred_batch, num_classes),
                         gt_trainIds, pred_batch
                     ))),
-                    argmax_output1234.flatten(0, -4)
-                ))).reshape(*argmax_output1234.shape[:-2], num_classes, num_classes).sum(2)
+                    pred1234.flatten(0, -4)
+                ))).reshape(*pred1234.shape[:-2], num_classes, num_classes).sum(2)
                 IoUs = per_class_iu_batch(hist).cpu().numpy()
                 mIoU = np.nanmean(IoUs, axis=-1)
 
-            print(' \t '.join([
-                'iter = {:8d}/{:8d}'.format(i_iter, args.num_steps),
-                'loss_seg1 = {:.3f}'.format(loss_seg_value1),
-                'loss_seg2 = {:.3f}'.format(loss_seg_value2),
-                'loss_diff = {:.3f}'.format(loss_diff_value),
-                'mIoU_target1 = {:.3f}'.format(mIoU[0]),
-                'mIoU_target2 = {:.3f}'.format(mIoU[1]),
-                'mIoU_target3 = {:.3f}'.format(mIoU[2]),
-                'mIoU_target4 = {:.3f}'.format(mIoU[3]),
-                'loss_seg_target1 = {:.3f}'.format(loss_seg_target1),
-                'loss_seg_target2 = {:.3f}'.format(loss_seg_target2),
-                'loss_seg_target3 = {:.3f}'.format(loss_seg_target3),
-                'loss_seg_target4 = {:.3f}'.format(loss_seg_target4),
-            ]))
+            print('  '.join(
+                ['iter = {:8d}/{:8d}'.format(i_iter, args.num_steps),
+                 'loss_seg1 = {:.3f}'.format(loss_seg_value1),
+                 'loss_seg2 = {:.3f}'.format(loss_seg_value2),
+                 'loss_diff = {:.3f}'.format(loss_diff_value),
+                 'loss_seg_target1 = {:.3f}'.format(loss_seg_target1),
+                 'loss_seg_target2 = {:.3f}'.format(loss_seg_target2),
+                 'loss_seg_target3 = {:.3f}'.format(loss_seg_target3),
+                 'loss_seg_target4 = {:.3f}'.format(loss_seg_target4),
+                 ] + ['mIoU_target{:d} = {:.3f}'.format(i+1, m) for i, m in enumerate(mIoU)]
+            ))
             if args.use_wandb:
                 wandb.log({
                     'loss_seg1': loss_seg_value1,

@@ -74,11 +74,11 @@ SAVE_PRED_EVERY = 100  # 5000, 600
 SNAPSHOT_DIR = './snapshots_diff_dualco/'
 WEIGHT_DECAY = 0.001
 
-LAMBDA_LOSS = [.0, .0, 1., .0]  # 0.005
+LAMBDA_TARGET = [.0, .0, 1., .0]
 
 ORTH = []
 NORM = 2
-LAMBDA_DIFF = [0.5, 0.5]  # 0.005
+LAMBDA_DIFF = [0.5, 0.5]
 
 PSLABEL_THRESHOLD = '10,90_100'
 PSLABEL_POLICY = 'per_class_1and2'
@@ -128,8 +128,8 @@ def get_arguments():
                         help="Path to the file listing the images in the target gt dataset.")
     parser.add_argument("--input-size-target-gt", type=str, default=INPUT_SIZE_TARGET_GT,
                         help="Comma-separated string with height and width of target gt images.")
-    parser.add_argument('--lambda_loss', type=float, nargs=4, default=LAMBDA_LOSS,
-                        help="lambda_loss for classifier losses.")
+    parser.add_argument('--lambda_target', type=float, nargs=4, default=LAMBDA_TARGET,
+                        help="lambda_target for classifier losses of target domain.")
     parser.add_argument('--orth', type=int, nargs='*', default=ORTH,
                         choices=[1, 2, 3],
                         help="orthogonal dimension for weight difference."
@@ -187,18 +187,6 @@ def get_arguments():
     #                     help="choose adaptation set.")
     parser.add_argument('--use-wandb', action='store_true')
     return parser.parse_args()
-
-
-def loss_calc(input, label, ignore_label, gpu):
-    """
-    This function returns cross entropy loss for semantic segmentation
-    """
-    # out shape batch_size x channels x h x w -> batch_size x channels x h x w
-    # label shape h x w x 1 x batch_size  -> batch_size x 1 x h x w
-    label = Variable(label.long()).cuda(gpu)
-    criterion = CrossEntropy2d(ignore_label=ignore_label).cuda(gpu)
-
-    return criterion(input, label)
 
 
 def lr_poly(base_lr, iter, max_iter, power):
@@ -511,8 +499,10 @@ def main(args):
             # 4xBxWxH
 
             loss_seg1, loss_seg2, _, _ = list(map(
-                lambda poten: loss_calc(
-                    poten, labels, args.ignore_label, args.gpu),
+                lambda poten: CrossEntropy2d(
+                    ignore_label=args.ignore_label)(poten, labels),
+                # lambda poten: loss_calc(
+                #     poten, labels, args.ignore_label, args.gpu),
                 poten1234))
 
             loss_diff = model.weight_diff(
@@ -574,14 +564,17 @@ def main(args):
             poten1234 = poten1234.reshape(4, -1, *poten1234.shape[1:])
 
             loss_seg_target1234 = list(map(
-                lambda pred_target: loss_calc(
-                    pred_target, pslabel, args.ignore_label, args.gpu),
+                lambda poten: CrossEntropy2d(
+                    ignore_label=args.ignore_label)(poten, pslabel),
+                # lambda pred_target: loss_calc(
+                #     pred_target, pslabel, args.ignore_label, args.gpu),
                 poten1234))
             loss_seg_target1, loss_seg_target2, loss_seg_target3, loss_seg_target4 = loss_seg_target1234
 
-            loss = torch.stack(loss_seg_target1234) @ \
-                torch.from_numpy(np.array(args.lambda_loss)).to(
-                    dtype=loss_seg_target1.dtype, device=args.gpu)
+            loss = sum(list(map(
+                lambda l, loss: l*loss,
+                args.lambda_target, loss_seg_target1234
+            )))
             loss = loss / args.iter_size
             loss.backward()
             loss_seg_target_value1 += loss_seg_target1.detach().cpu().numpy() / \

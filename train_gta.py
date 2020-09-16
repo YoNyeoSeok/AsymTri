@@ -4,32 +4,28 @@ import torch
 import torch.nn as nn
 from torch.utils import data
 import numpy as np
-import pickle
-import cv2
+
+
 import torch.optim as optim
-import scipy.misc
+
 import torch.backends.cudnn as cudnn
-import sys
+
 import os
 import os.path as osp
 from deeplab.model import Res_Deeplab
-from deeplab.loss import CrossEntropy2d
+
 from deeplab.datasets import GTA5DataSet
-import matplotlib.pyplot as plt
-import random
+
+
 import timeit
-import torchvision.transforms as transforms
-import util
+
 
 start = timeit.default_timer()
 
-#IMG_MEAN = np.array((104.00698793,116.66876762,122.67891434), dtype=np.float32)
-IMG_MEAN = np.array((0.406, 0.456, 0.485), dtype=np.float32) # BGR
-IMG_STD = np.array((0.225, 0.224, 0.229), dtype=np.float32) # BGR
-# IMG_MEAN = [0.485, 0.456, 0.406]
-# IMG_STD = [0.229, 0.224, 0.225]
+IMG_MEAN = np.array((0.406, 0.456, 0.485), dtype=np.float32)  # BGR
+IMG_STD = np.array((0.225, 0.224, 0.229), dtype=np.float32)  # BGR
 BATCH_SIZE = 4
-DATA_DIRECTORY = './datasets/gta5'
+DATA_DIRECTORY = './data/GTA5'
 DATA_LIST_PATH = './dataset/list/gta5/train.lst'
 NUM_CLASSES = 19
 IGNORE_LABEL = 255
@@ -40,7 +36,7 @@ MOMENTUM = 0.9
 NUM_STEPS = 100000
 POWER = 0.9
 RANDOM_SEED = 1234
-RESTORE_FROM = ''
+RESTORE_FROM = 'https://download.pytorch.org/models/resnet101-5d3b4d8f.pth'
 SAVE_NUM_IMAGES = 2
 SAVE_PRED_EVERY = 5000
 SNAPSHOT_DIR = './gta_src_train/'
@@ -53,7 +49,7 @@ GPU = '0'
 
 def get_arguments():
     """Parse all the arguments provided from the CLI.
-    
+
     Returns:
       A list of parsed arguments.
     """
@@ -68,6 +64,8 @@ def get_arguments():
                         help="The index of the label to ignore during the training.")
     parser.add_argument("--input-size", type=str, default=INPUT_SIZE,
                         help="Comma-separated string with height and width of images.")
+    parser.add_argument("--is-training", action="store_true",
+                        help="Whether to updates the running means and variances during the training.")
     parser.add_argument("--learning-rate", type=float, default=LEARNING_RATE,
                         help="Base learning rate for training with polynomial decay.")
     parser.add_argument("--momentum", type=float, default=MOMENTUM,
@@ -106,21 +104,12 @@ def get_arguments():
                         help="Whether to pin memory in train & eval.")
     parser.add_argument("--log-file", type=str, default=LOG_FILE,
                         help="The name of log file.")
-    parser.add_argument('--debug',help='True means logging debug info.',
+    parser.add_argument('--debug', help='True means logging debug info.',
                         default=False, action='store_true')
     return parser.parse_args()
 
-args = get_arguments()
 
-def loss_calc(pred, label):
-    """
-    This function returns cross entropy loss for semantic segmentation
-    """
-    # out shape batch_size x channels x h x w -> batch_size x channels x h x w
-    # label shape h x w x 1 x batch_size  -> batch_size x 1 x h x w
-    criterion = torch.nn.CrossEntropyLoss(ignore_index=IGNORE_LABEL).cuda()
-    
-    return criterion(pred, label)
+args = get_arguments()
 
 
 def lr_poly(base_lr, iter, max_iter, power):
@@ -143,14 +132,12 @@ def get_1x_lr_params_NOscale(model):
     b.append(model.layer3)
     b.append(model.layer4)
 
-    
-    for i in range(len(b)):
-        for j in b[i].modules():
-            jj = 0
-            for k in j.parameters():
-                jj+=1
-                if k.requires_grad:
-                    yield k
+    for l in b:
+        for m in l.modules():
+            for p in m.parameters():
+                if p.requires_grad:
+                    yield p
+
 
 def get_10x_lr_params(model):
     """
@@ -160,11 +147,11 @@ def get_10x_lr_params(model):
     b = []
     b.append(model.layer5.parameters())
 
-    for j in range(len(b)):
-        for i in b[j]:
+    for p in b:
+        for i in p:
             yield i
-            
-            
+
+
 def adjust_learning_rate(optimizer, i_iter):
     """Sets the learning rate to the initial LR divided by 5 at 60th, 120th and 160th epochs"""
     lr = lr_poly(args.learning_rate, i_iter, args.num_steps, args.power)
@@ -178,9 +165,6 @@ def main():
     if not os.path.exists(args.snapshot_dir):
         os.makedirs(args.snapshot_dir)
 
-    logger = util.set_logger(args.snapshot_dir, args.log_file, args.debug)
-    logger.info('start with arguments %s', args)
-
     h, w = map(int, args.input_size.split(','))
     input_size = (h, w)
     lscale, hscale = map(float, args.train_scale.split(','))
@@ -191,50 +175,42 @@ def main():
     # Create network.
     model = Res_Deeplab(num_classes=args.num_classes)
 
-    #saved_state_dict = torch.load(args.restore_from)
-    #new_params = model.state_dict().copy()
-    #for i in saved_state_dict:
-    #    #Scale.layer5.conv2d_list.3.weight
-    #    i_parts = i.split('.')
-    #    # print i_parts
-    #    if not args.num_classes == 21 or not i_parts[1]=='layer5':
-    #        new_params['.'.join(i_parts[1:])] = saved_state_dict[i]
-    model_urls = {
-    'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
-    'resnet34': 'https://download.pytorch.org/models/resnet34-333f7ec4.pth',
-    'resnet50': 'https://download.pytorch.org/models/resnet50-19c8e357.pth',
-    'resnet101': 'https://download.pytorch.org/models/resnet101-5d3b4d8f.pth',
-    'resnet152': 'https://download.pytorch.org/models/resnet152-b121ed2d.pth',
-    }
-    saved_state_dict = torch.utils.model_zoo.load_url(model_urls['resnet101'])
-    # coco pretrained parameters: 
-    # saved_state_dict = torch.load(args.restore_from)
     new_params = model.state_dict().copy()
-    for i in saved_state_dict:
-        #Scale.layer5.conv2d_list.3.weight
-        i_parts = str(i).split('.')
-        # print i_parts
-        if not i_parts[0]=='fc':
-            new_params['.'.join(i_parts[0:])] = saved_state_dict[i]
+    if args.restore_from[:4] == 'http':
+        saved_state_dict = torch.utils.model_zoo.load_url(args.restore_from)
+    else:
+        saved_state_dict = torch.load(args.restore_from)
+    missing_keys = set(k for k in saved_state_dict.keys()
+                       if k not in model.state_dict().keys())
+    if missing_keys == set(('fc.weight', 'fc.bias')):
+        for i in saved_state_dict:
+            if i not in missing_keys:
+                new_params[i] = saved_state_dict[i]
+    elif missing_keys == set(('layer5')):
+        pass
+    else:
+        raise NotImplementedError(
+            "Can't guess possible restore model from url")
     model.load_state_dict(new_params)
-    #model.float()
-    model.eval() # use_global_stats = True
-    #model.train()
+    if args.is_training:
+        model.train()
+    else:
+        model.eval()
     device = torch.device("cuda:" + str(args.gpu))
     model.to(device)
-    
+
     cudnn.benchmark = True
 
-    trainloader = data.DataLoader(GTA5DataSet(args.data_dir, args.data_list, max_iters=args.num_steps*args.batch_size, crop_size=input_size,train_scale=train_scale,
-                    scale=args.random_scale, mirror=args.random_mirror, mean=IMG_MEAN, std = IMG_STD),
-                    batch_size=args.batch_size, shuffle=True, num_workers=5, pin_memory=args.pin_memory)
-    optimizer = optim.SGD([{'params': get_1x_lr_params_NOscale(model), 'lr': args.learning_rate }, 
-                {'params': get_10x_lr_params(model), 'lr': 10*args.learning_rate}], 
-                lr=args.learning_rate, momentum=args.momentum,weight_decay=args.weight_decay)
+    trainloader = data.DataLoader(GTA5DataSet(args.data_dir, args.data_list, max_iters=args.num_steps*args.batch_size, crop_size=input_size, train_scale=train_scale,
+                                              scale=args.random_scale, mirror=args.random_mirror, mean=IMG_MEAN, std=IMG_STD),
+                                  batch_size=args.batch_size, shuffle=True, num_workers=5, pin_memory=args.pin_memory)
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=args.ignore_label)
+    optimizer = optim.SGD([{'params': get_1x_lr_params_NOscale(model), 'lr': args.learning_rate},
+                           {'params': get_10x_lr_params(model), 'lr': 10*args.learning_rate}],
+                          lr=args.learning_rate, momentum=args.momentum, weight_decay=args.weight_decay)
     optimizer.zero_grad()
 
     interp = nn.Upsample(size=input_size, mode='bilinear', align_corners=True)
-
 
     for i_iter, batch in enumerate(trainloader):
         images, labels, _, _ = batch
@@ -244,24 +220,27 @@ def main():
         optimizer.zero_grad()
         adjust_learning_rate(optimizer, i_iter)
         pred = interp(model(images))
-        loss = loss_calc(pred, labels)
+        loss = criterion(pred, labels)
         loss.backward()
         optimizer.step()
-        
-        # print('iter = ', i_iter, 'of', args.num_steps,'completed, loss = ', loss.data.cpu().numpy())
-        logger.info('iter = {} of {} completed, loss = {:.4f}'.format(i_iter,args.num_steps,loss.data.cpu().numpy()))
+
+        print('iter [{:8d}/{:8d}]: loss {}'.format(
+            i_iter, args.num_steps, loss.data.cpu().numpy()))
 
         if i_iter >= args.num_steps-1:
             print('save model ...')
-            torch.save(model.state_dict(),osp.join(args.snapshot_dir, 'VOC12_scenes_'+str(args.num_steps)+'.pth'))
+            torch.save(model.state_dict(), osp.join(
+                args.snapshot_dir, 'GTA5_'+str(args.num_steps)+'.pth'))
             break
 
-        if i_iter % args.save_pred_every == 0 and i_iter!=0:
+        if i_iter % args.save_pred_every == 0 and i_iter != 0:
             print('taking snapshot ...')
-            torch.save(model.state_dict(),osp.join(args.snapshot_dir, 'VOC12_scenes_'+str(i_iter)+'.pth'))     
+            torch.save(model.state_dict(), osp.join(
+                args.snapshot_dir, 'GTA5_'+str(i_iter)+'.pth'))
 
     end = timeit.default_timer()
-    print(end-start,'seconds')
+    print(end-start, 'seconds')
+
 
 if __name__ == '__main__':
     main()

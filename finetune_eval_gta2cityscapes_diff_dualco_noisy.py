@@ -326,7 +326,7 @@ def main(args):
     """Create the model and start the training."""
 
     if args.use_wandb:
-        wandb.init(project='AsymTri_Pipeline_Diff_DualCo',
+        wandb.init(project='AsymTri_Pipeline_Diff_DualCo_Noisy',
                    name='Round1', dir='./', config=args)
 
     w, h = map(int, args.input_size.split(','))
@@ -620,38 +620,51 @@ def main(args):
                              loss_con_target43, loss_seg_target4],
                         ))).sum(1)
 
-                    # 16xNxBxWxH
-                    # filtered_pm_pred_1_2_1and2_1or2_3_4_3and4_3or4 = torch.cat(list(map(
-                    #     lambda argmax_output_ab:
-                    #         # 8xNxBxWxH
-                    #         torch.cat(list(map(
-                    #             # 4xNxBxWxH
-                    #             lambda igc: compute_filtered_output_a_b_and_or(
-                    #                 loss, argmax_output_ab,
-                    #                 ignore_label=args.ignore_label, C=num_classes, N=10, ignore_class=igc),
-                    #             [True, False]
-                    #         ))),
-                    #     poten1234.argmax(2).split(2)
-                    # )))
+                        # BxNx1
+                        thr_tb = compute_threshold_table(
+                            # Bx(WH|WxH)
+                            -loss,
+                            torch.zeros_like(loss).long(),
+                            C=1, N=clsample_thld_n, ignore_class=True,
+                        )
+                        # [BxNx1].gather(2, BxNxWH) ) -> BxNxWH
+                        # BxNxWH -> BxNx(WH|WxH)
+                        thr_output = thr_tb.gather(
+                            2,
+                            # [Bx(WH|WxH) -> Bx1xWH].repeat(1xNx1) -> BBxNxWH
+                            torch.zeros_like(
+                                loss.flatten(-2)).long().repeat(1, clsample_thld_n, 1),
+                        ).reshape(len(loss), clsample_thld_n, *loss.shape[1:])
 
-                    # BxNx1
-                    thr_tb = compute_threshold_table(
-                        # Bx(WH|WxH)
-                        -loss,
-                        torch.zeros_like(loss).long(),
-                        C=1, N=clsample_thld_n, ignore_class=True,
-                    )
-                    # [BxNx1].gather(2, BxNxWH) ) -> BxNxWH
-                    # BxNxWH -> BxNx(WH|WxH)
-                    thr_output = thr_tb.gather(
-                        2,
-                        # [Bx(WH|WxH) -> Bx1xWH].repeat(1xNx1) -> BBxNxWH
-                        torch.zeros_like(
-                            loss.flatten(-2)).long().repeat(1, clsample_thld_n, 1),
-                    ).reshape(len(loss), clsample_thld_n, *loss.shape[1:])
+                        selected_sample = - \
+                            loss > thr_output[:,
+                                              thr_columns.index(clsample_thld)]
+                        selected_samples = [selected_sample]*4
 
-                    selected_sample = - \
-                        loss > thr_output[:, thr_columns.index(clsample_thld)]
+                elif args.clsample_policy == 'CoTeaching_plus_34':
+                    # 8xNxBxWxH
+                    filtered_small_loss_3_4_3and4_3or4 = torch.cat(list(map(
+                        # 4xNxBxWxH
+                        lambda igc: compute_filtered_output_a_b_and_or(
+                            torch.stack(loss_seg_target1234[-2:]),
+                            poten1234[-2:].argmax(2),
+                            ignore_label=args.ignore_label, C=num_classes, N=10, ignore_class=igc),
+                        [True, False]
+                    )))
+
+                    selected_sample_3, selected_sample_4, selected_sample_3and4 = filtered_small_loss_3_4_3and4_3or4[
+                        :3,
+                        thr_columns.index(clsample_thld)]
+                    selected_sample_only3 = selected_sample_3 * \
+                        (~selected_sample_3and4)
+                    selected_sample_only4 = selected_sample_4 * \
+                        (~selected_sample_3and4)
+                    selected_samples = [
+                        torch.zeros_like(selected_sample_3).bool(),
+                        torch.zeros_like(selected_sample_3).bool(),
+                        selected_sample_only3,
+                        selected_sample_only4,
+                    ]
 
             if args.is_training:
                 model.train()
@@ -671,9 +684,10 @@ def main(args):
                 poten1234))
 
             loss_seg_target1, loss_seg_target2, loss_seg_target3, loss_seg_target4 = torch.stack(list(map(
-                lambda l, loss: l*loss[selected_sample].mean(),
+                lambda l, loss, sample: l*loss[sample].mean(),
                 args.lambda_target,
-                loss_seg_target1234
+                loss_seg_target1234,
+                selected_samples,
             )))
 
             loss = loss_seg_target1 + loss_seg_target2 + loss_seg_target3 + loss_seg_target4

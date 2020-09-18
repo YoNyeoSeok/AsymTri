@@ -20,6 +20,7 @@ import json
 import pandas as pd
 from PIL import Image
 from eval_iou import (load_gt, label_mapping,
+                      compute_threshold_table,
                       per_class_filter_two_output,
                       compute_filtered_output_a_b_and_or,
                       fast_hist_torch, per_class_iu_torch,
@@ -451,6 +452,8 @@ def main(args):
                     '3', '4', '3and4', '3or4',
                     'per_class_3', 'per_class_4', 'per_class_3and4', 'per_class_3or4',
                     ]
+    clsample_thld_n, clsample_thld = args.clsample_threshold.split(',')
+    clsample_thld_n = int(clsample_thld_n)
 
     dfs = eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
                      testtargetloader, mapping, interp_target_gt, args.gpu_eval)
@@ -614,11 +617,41 @@ def main(args):
                             lambda l, loss: l*loss,
                             np.array(args.lambda_clean_sample).flatten(),
                             [loss_seg_target3, loss_con_target34,
-                                loss_con_target43, loss_seg_target4],
-                        )))
+                             loss_con_target43, loss_seg_target4],
+                        ))).sum(1)
 
-                loss_threshold = torch.ones_like(
-                    loss.sum(dim=1)).bool()
+                    # 16xNxBxWxH
+                    # filtered_pm_pred_1_2_1and2_1or2_3_4_3and4_3or4 = torch.cat(list(map(
+                    #     lambda argmax_output_ab:
+                    #         # 8xNxBxWxH
+                    #         torch.cat(list(map(
+                    #             # 4xNxBxWxH
+                    #             lambda igc: compute_filtered_output_a_b_and_or(
+                    #                 loss, argmax_output_ab,
+                    #                 ignore_label=args.ignore_label, C=num_classes, N=10, ignore_class=igc),
+                    #             [True, False]
+                    #         ))),
+                    #     poten1234.argmax(2).split(2)
+                    # )))
+
+                    # BxNx1
+                    thr_tb = compute_threshold_table(
+                        # Bx(WH|WxH)
+                        -loss,
+                        torch.zeros_like(loss).long(),
+                        C=1, N=clsample_thld_n, ignore_class=True,
+                    )
+                    # [BxNx1].gather(2, BxNxWH) ) -> BxNxWH
+                    # BxNxWH -> BxNx(WH|WxH)
+                    thr_output = thr_tb.gather(
+                        2,
+                        # [Bx(WH|WxH) -> Bx1xWH].repeat(1xNx1) -> BBxNxWH
+                        torch.zeros_like(
+                            loss.flatten(-2)).long().repeat(1, clsample_thld_n, 1),
+                    ).reshape(len(loss), clsample_thld_n, *loss.shape[1:])
+
+                    selected_sample = - \
+                        loss > thr_output[:, thr_columns.index(clsample_thld)]
 
             if args.is_training:
                 model.train()
@@ -638,7 +671,7 @@ def main(args):
                 poten1234))
 
             loss_seg_target1, loss_seg_target2, loss_seg_target3, loss_seg_target4 = torch.stack(list(map(
-                lambda l, loss: l*loss[loss_threshold].mean(),
+                lambda l, loss: l*loss[selected_sample].mean(),
                 args.lambda_target,
                 loss_seg_target1234
             )))

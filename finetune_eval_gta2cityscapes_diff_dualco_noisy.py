@@ -75,19 +75,20 @@ SAVE_PRED_EVERY = 100  # 5000, 600
 SNAPSHOT_DIR = './snapshots_diff_dualco/'
 WEIGHT_DECAY = 0.001
 
-# LAMBDA_TARGET = [.0, .0, 1., .0]
-LAMBDA_TARGET_LOSS_CONST = [.0, .0, .25, .25, .0, .0, .25, .25]
-LAMBDA_CONST = [.5, .5]
-
-ORTH = []
-NORM = 2
+WEIGHT_DIFF_ORTH = []
+WEIGHT_DIFF_NORM = 2
 LAMBDA_DIFF = [0.5, 0.5]
 
-PSLABEL_THRESHOLD = '10,90_100'
-PSLABEL_POLICY = 'per_class_1and2'
+PSEUDO_LABEL_THRESHOLD = '10,90_100'
+PSEUDO_LABEL_POLICY = 'per_class_1and2'
+
+CLEAN_SAMPLE_THRESHOLD = '10,90_100'
+CLEAN_SAMPLE_POLICY = 'JoCoR_34'
+LAMBDA_CLEAN_SAMPLE = [[.25, .25],
+                       [.25, .25], ]
+LAMBDA_TARGET = [.25, .25, .25, .25]
 
 TARGET = 'cityscapes'
-# SET = 'train'
 
 
 def get_arguments():
@@ -101,12 +102,8 @@ def get_arguments():
                         help="available options : DeepLab, DeepLabDualCo")
     parser.add_argument("--target", type=str, default=TARGET,
                         help="available options : cityscapes")
-    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE,
-                        help="Number of images sent to the network in one step.")
-    parser.add_argument("--iter-size", type=int, default=ITER_SIZE,
-                        help="Accumulate gradients for ITER_SIZE iterations.")
-    parser.add_argument("--num-workers", type=int, default=NUM_WORKERS,
-                        help="number of workers for multithread dataloading.")
+    parser.add_argument("--num-classes", type=int, default=NUM_CLASSES,
+                        help="Number of classes to predict (including background).")
     parser.add_argument("--data-dir", type=str, default=DATA_DIRECTORY,
                         help="Path to the directory containing the source dataset.")
     parser.add_argument("--data-list", type=str, default=DATA_LIST_PATH,
@@ -131,33 +128,42 @@ def get_arguments():
                         help="Path to the file listing the images in the target gt dataset.")
     parser.add_argument("--input-size-target-gt", type=str, default=INPUT_SIZE_TARGET_GT,
                         help="Comma-separated string with height and width of target gt images.")
-    # parser.add_argument('--lambda_target', type=float, nargs=4, default=LAMBDA_TARGET,
-    #                     help="lambda_target for classifier losses of target domain.")
-    parser.add_argument('--lambda_target_loss_const', type=float, nargs=8, default=LAMBDA_TARGET_LOSS_CONST,
-                        help="lambda_target_loss_const for classifier losses and contrastive loss of target domain.")
-    parser.add_argument('--orth', type=int, nargs='*', default=ORTH,
-                        choices=[1, 2, 3],
-                        help="orthogonal dimension for weight difference."
-                             "[1] for channel, [2, 3] for kernel, [1, 2, 3] for whole feature")
-    parser.add_argument('--norm', type=int, default=NORM,
-                        choices=[1, 2],
+
+    parser.add_argument('--orth', type=int, nargs='*', default=WEIGHT_DIFF_ORTH, choices=[1, 2, 3],
+                        help="orthogonal dimension for weight difference. [1] for channel, [2, 3] for kernel, [1, 2, 3] for whole feature")
+    parser.add_argument('--norm', type=int, choices=[1, 2], default=WEIGHT_DIFF_NORM,
                         help="norm for weight difference.")
     parser.add_argument('--lambda_diff', type=float, nargs=2, default=LAMBDA_DIFF,
                         help="lambda_diff for weight difference.")
-    parser.add_argument('--pslabel-threshold', type=str, default=PSLABEL_THRESHOLD,
-                        help="pslabel_threshold. ('10,00_100' ~ '10,90_100')")
-    parser.add_argument('--pslabel-policy', type=str, default=PSLABEL_POLICY,
+    parser.add_argument('--pslabel-threshold', type=str, default=PSEUDO_LABEL_THRESHOLD,
+                        help="pseudo label threshold. ('10,00_100' ~ '10,90_100')")
+    parser.add_argument('--pslabel-policy', type=str, default=PSEUDO_LABEL_POLICY,
                         help="pslabel policy (a, b, per_class_a, per_class_b, aandb, aorb for a, b in [[1, 2], [3, 4]]), default: per_class_1and2.")
+    parser.add_argument('--clsample-threshold', type=str, default=CLEAN_SAMPLE_THRESHOLD,
+                        help="clean sample threshold. ('10,00_100' ~ '10,90_100')")
+    parser.add_argument('--clsample-policy', type=str, default=CLEAN_SAMPLE_POLICY,
+                        help="clean label policy (DeCouple_ab, CoTeaching_ab, CoTeaching_plus_ab, JoCoR_ab for a, b in [[1, 2], [3, 4]]), default: JoCoR_34.")
+    parser.add_argument('--lambda-clean-sample', action='append', nargs='+', type=float, default=LAMBDA_CLEAN_SAMPLE,
+                        help="param for clean sample policy")
+    parser.add_argument('--lambda_target', type=float, nargs=4, default=LAMBDA_TARGET,
+                        help="lambda_target for classifier losses of target domain.")
+
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE,
+                        help="Number of images sent to the network in one step.")
+    parser.add_argument("--iter-size", type=int, default=ITER_SIZE,
+                        help="Accumulate gradients for ITER_SIZE iterations.")
+    parser.add_argument("--num-workers", type=int, default=NUM_WORKERS,
+                        help="number of workers for multithread dataloading.")
     parser.add_argument("--is-training", action="store_true",
                         help="Whether to updates the running means and variances during the training.")
     parser.add_argument("--learning-rate", type=float, default=LEARNING_RATE,
                         help="Base learning rate for training with polynomial decay.")
     parser.add_argument("--momentum", type=float, default=MOMENTUM,
                         help="Momentum component of the optimiser.")
+    parser.add_argument("--weight-decay", type=float, default=WEIGHT_DECAY,
+                        help="Regularisation parameter for L2-loss.")
     parser.add_argument("--not-restore-last", action="store_true",
                         help="Whether to not restore last (FC) layers.")
-    parser.add_argument("--num-classes", type=int, default=NUM_CLASSES,
-                        help="Number of classes to predict (including background).")
     parser.add_argument("--num-steps-start", type=int, default=NUM_STEPS_START,
                         help="Number of training steps to start.")
     parser.add_argument("--num-steps", type=int, default=NUM_STEPS,
@@ -170,8 +176,6 @@ def get_arguments():
                         help="Whether to randomly mirror the inputs during the training.")
     parser.add_argument("--random-scale", action="store_true",
                         help="Whether to randomly scale the inputs during the training.")
-    parser.add_argument("--random-seed", type=int, default=RANDOM_SEED,
-                        help="Random seed to have reproducible results.")
     parser.add_argument("--restore-from", type=str, default=RESTORE_FROM,
                         help="Where restore model parameters from.")
     parser.add_argument("--restore-from-pslabel", type=str, default=RESTORE_FROM_PSLABEL,
@@ -182,14 +186,12 @@ def get_arguments():
                         help="Save summaries and checkpoint every often.")
     parser.add_argument("--snapshot-dir", type=str, default=SNAPSHOT_DIR,
                         help="Where to save snapshots of the model.")
-    parser.add_argument("--weight-decay", type=float, default=WEIGHT_DECAY,
-                        help="Regularisation parameter for L2-loss.")
+    parser.add_argument("--random-seed", type=int, default=RANDOM_SEED,
+                        help="Random seed to have reproducible results.")
     parser.add_argument("--gpu", type=int, default=0,
                         help="choose gpu device.")
     parser.add_argument("--gpu-eval", type=int, default=1,
                         help="choose gpu device for eval.")
-    # parser.add_argument("--set", type=str, default=SET,
-    #                     help="choose adaptation set.")
     parser.add_argument('--use-wandb', action='store_true')
     return parser.parse_args()
 
@@ -212,23 +214,23 @@ def adjust_learning_rate_D(optimizer, i_iter):
         optimizer.param_groups[1]['lr'] = lr * 10
 
 
-def save_target_pred_max_argmax(model, targetloader, interp_target_gt, save_dir):
-    model.eval()
-    with torch.no_grad():
-        for ind, batch in enumerate(targetloader):
-            images, _, name = batch
-            images = images.cuda(args.gpu)
+# def save_target_pred_max_argmax(model, targetloader, interp_target_gt, save_dir):
+#     model.eval()
+#     with torch.no_grad():
+#         for ind, batch in enumerate(targetloader):
+#             images, _, name = batch
+#             images = images.cuda(args.gpu)
 
-            # 4xBxCxWxH
-            output1234 = torch.cat(model(images))
-            # 4xBxCxWxH
-            output1234 = interp_target_gt(output1234)
-            output1234 = output1234.reshape(4, -1, *output1234.shape[1:])
-            for n, o1234 in zip(name, output1234.split(1, dim=1)):
-                # [4xCxWxH].max(1) -> (4xWxH), (4xWxH)
-                max_argmax_o1234 = torch.stack(o1234.max(1))
-                save_name = osp.splitext(n)[0]+'.pth'
-                torch.save(max_argmax_o1234, osp.join(save_name, save_name))
+#             # 4xBxCxWxH
+#             output1234 = torch.cat(model(images))
+#             # 4xBxCxWxH
+#             output1234 = interp_target_gt(output1234)
+#             output1234 = output1234.reshape(4, -1, *output1234.shape[1:])
+#             for n, o1234 in zip(name, output1234.split(1, dim=1)):
+#                 # [4xCxWxH].max(1) -> (4xWxH), (4xWxH)
+#                 max_argmax_o1234 = torch.stack(o1234.max(1))
+#                 save_name = osp.splitext(n)[0]+'.pth'
+#                 torch.save(max_argmax_o1234, osp.join(save_name, save_name))
 
 
 def eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
@@ -353,8 +355,10 @@ def main(args):
         else:
             raise NotImplementedError(
                 "wrong model name: {}".format(args.model))
-
-        model.train()
+        if args.is_training:
+            model.train()
+        else:
+            model.eval()
         model.cuda(args.gpu)
         prev_model.eval()
         prev_model.cuda(args.gpu)
@@ -453,7 +457,7 @@ def main(args):
     if args.use_wandb:
         for name_class, df in dfs.items():
             wandb.log({
-                '{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
+                'eval/{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
                 for top_p in policy_index
                 for filter_output in thr_columns
             }, step=0)
@@ -462,7 +466,7 @@ def main(args):
     if args.use_wandb:
         for name_class, df in pslabel_dfs.items():
             wandb.log({
-                'pslabel_{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
+                'eval/pslabel/{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
                 for top_p in policy_index
                 for filter_output in thr_columns
             }, step=0)
@@ -472,10 +476,13 @@ def main(args):
                           lr=args.learning_rate, momentum=args.momentum, weight_decay=args.weight_decay)
 
     for i_iter in range(args.num_steps_start, args.num_steps):
-        model.train()
+        if args.is_training:
+            model.train()
+        else:
+            model.eval()
         model.cuda(args.gpu)
         prev_model.eval()
-        prev_model.cuda(args.gpu)
+        prev_model.cuda(args.gpu_eval)
 
         loss_seg_value1 = 0
         loss_seg_value2 = 0
@@ -492,7 +499,8 @@ def main(args):
             optimizer.zero_grad()
             _, batch = next(trainloader_iter)
             images, labels, _, _ = batch
-            images = Variable(images).cuda(args.gpu)
+            images = images.cuda(args.gpu)
+            labels = labels.long().cuda(args.gpu)
 
             # 4BxCxWxH
             output1234 = torch.cat(model(images))
@@ -530,7 +538,7 @@ def main(args):
             optimizer.zero_grad()
             _, batch = next(targetloader_iter)
             images, _, name = batch
-            images = Variable(images).cuda(args.gpu)
+            images = images.cuda(args.gpu_eval)
 
             prev_model.eval()
             with torch.no_grad():
@@ -563,7 +571,9 @@ def main(args):
                     policy_index.index(args.pslabel_policy),
                     thr_columns.index(threshold)]
 
-            model.eva()
+            images = images.cuda(args.gpu)
+            pslabel = pslabel.cuda(args.gpu)
+            model.eval()
             with torch.no_grad():
                 output1234 = torch.cat(model(images))
                 # 4xBxCxWxH
@@ -571,84 +581,69 @@ def main(args):
                 poten1234 = poten1234.reshape(4, -1, *poten1234.shape[1:])
 
                 loss_seg_target1234 = list(map(
-                    lambda poten: CrossEntropy2d(
-                        reduction='none', ignore_label=args.ignore_label)(poten, pslabel),
+                    lambda poten: nn.CrossEntropyLoss(
+                        reduction='none', ignore_index=args.ignore_label)(poten, pslabel),
                     # lambda pred_target: loss_calc(
                     #     pred_target, pslabel, args.ignore_label, args.gpu),
                     poten1234))
                 loss_seg_target1, loss_seg_target2, loss_seg_target3, loss_seg_target4 = loss_seg_target1234
 
-                # contrastive loss
-                if version.parse(torch.__version__) >= version.parse("1.6.0"):
-                    loss_con_target12 = nn.KLDivLoss(
-                        reduction='none', log_target=True)(poten1234[0], poten1234[1])
-                    loss_con_target21 = nn.KLDivLoss(
-                        reduction='none', log_target=True)(poten1234[1], poten1234[0])
-                    loss_con_target34 = nn.KLDivLoss(
-                        reduction='none', log_target=True)(poten1234[-2], poten1234[-1])
-                    loss_con_target43 = nn.KLDivLoss(
-                        reduction='none', log_target=True)(poten1234[-1], poten1234[-2])
-                else:
-                    pred1234 = F.softmax(poten1234, dim=-3)
-                    loss_con_target12 = nn.KLDivLoss(
-                        reduction='none')(poten1234[0], pred1234[1])
-                    loss_con_target21 = nn.KLDivLoss(
-                        reduction='none')(poten1234[1], pred1234[0])
-                    loss_con_target34 = nn.KLDivLoss(
-                        reduction='none')(poten1234[-2], pred1234[-1])
-                    loss_con_target43 = nn.KLDivLoss(
-                        reduction='none')(poten1234[-1], pred1234[-2])
+                if 'JoCoR' in args.clsample_policy:
+                    if version.parse(torch.__version__) >= version.parse("1.6.0"):
+                        loss_con_target12 = nn.KLDivLoss(
+                            reduction='none', log_target=True)(poten1234[0], poten1234[1])
+                        loss_con_target21 = nn.KLDivLoss(
+                            reduction='none', log_target=True)(poten1234[1], poten1234[0])
+                        loss_con_target34 = nn.KLDivLoss(
+                            reduction='none', log_target=True)(poten1234[-2], poten1234[-1])
+                        loss_con_target43 = nn.KLDivLoss(
+                            reduction='none', log_target=True)(poten1234[-1], poten1234[-2])
+                    else:
+                        pred1234 = F.softmax(poten1234, dim=-3)
+                        loss_con_target12 = nn.KLDivLoss(
+                            reduction='none')(poten1234[0], pred1234[1])
+                        loss_con_target21 = nn.KLDivLoss(
+                            reduction='none')(poten1234[1], pred1234[0])
+                        loss_con_target34 = nn.KLDivLoss(
+                            reduction='none')(poten1234[-2], pred1234[-1])
+                        loss_con_target43 = nn.KLDivLoss(
+                            reduction='none')(poten1234[-1], pred1234[-2])
+                    # contrastive loss
+                    if args.clsample_policy == 'JoCoR_34':
+                        loss = sum(list(map(
+                            lambda l, loss: l*loss,
+                            np.array(args.lambda_clean_sample).flatten(),
+                            [loss_seg_target3, loss_con_target34,
+                                loss_con_target43, loss_seg_target4],
+                        )))
 
-                loss = sum(list(map(
-                    lambda l, loss: l*loss,
-                    args.lambda_target_loss_const,
-                    [*loss_seg_target1234,
-                     loss_con_target12, loss_con_target21, loss_con_target34, loss_con_target43]
-                )))
+                loss_threshold = torch.ones_like(
+                    loss.sum(dim=1)).bool()
 
-                sample_select = loss == loss
+            if args.is_training:
+                model.train()
+            else:
+                model.eval()
 
-            model.train()
             output1234 = torch.cat(model(images))
             # 4xBxCxWxH
             poten1234 = interp_target(output1234)
             poten1234 = poten1234.reshape(4, -1, *poten1234.shape[1:])
 
             loss_seg_target1234 = list(map(
-                lambda poten: CrossEntropy2d(
-                    reduction='none', ignore_label=args.ignore_label)(poten, pslabel),
+                lambda poten: nn.CrossEntropyLoss(
+                    reduction='none', ignore_index=args.ignore_label)(poten, pslabel),
                 # lambda pred_target: loss_calc(
                 #     pred_target, pslabel, args.ignore_label, args.gpu),
                 poten1234))
-            loss_seg_target1, loss_seg_target2, loss_seg_target3, loss_seg_target4 = loss_seg_target1234
 
-            # contrastive loss
-            if version.parse(torch.__version__) >= version.parse("1.6.0"):
-                loss_con_target12 = nn.KLDivLoss(
-                    reduction='none', log_target=True)(poten1234[0], poten1234[1])
-                loss_con_target21 = nn.KLDivLoss(
-                    reduction='none', log_target=True)(poten1234[1], poten1234[0])
-                loss_con_target34 = nn.KLDivLoss(
-                    reduction='none', log_target=True)(poten1234[-2], poten1234[-1])
-                loss_con_target43 = nn.KLDivLoss(
-                    reduction='none', log_target=True)(poten1234[-1], poten1234[-2])
-            else:
-                pred1234 = F.softmax(poten1234, dim=-3)
-                loss_con_target12 = nn.KLDivLoss(
-                    reduction='none')(poten1234[0], pred1234[1])
-                loss_con_target21 = nn.KLDivLoss(
-                    reduction='none')(poten1234[1], pred1234[0])
-                loss_con_target34 = nn.KLDivLoss(
-                    reduction='none')(poten1234[-2], pred1234[-1])
-                loss_con_target43 = nn.KLDivLoss(
-                    reduction='none')(poten1234[-1], pred1234[-2])
-
-            loss = sum(list(map(
-                lambda l, loss: l*loss[sample_select],
-                args.lambda_target_loss_const,
-                [*loss_seg_target1234,
-                    loss_con_target12, loss_con_target21, loss_con_target34, loss_con_target43]
+            loss_seg_target1, loss_seg_target2, loss_seg_target3, loss_seg_target4 = torch.stack(list(map(
+                lambda l, loss: l*loss[loss_threshold].mean(),
+                args.lambda_target,
+                loss_seg_target1234
             )))
+
+            loss = loss_seg_target1 + loss_seg_target2 + loss_seg_target3 + loss_seg_target4
 
             loss = loss / args.iter_size
             loss.backward()
@@ -664,7 +659,7 @@ def main(args):
             optimizer.step()
 
             gt_labelIds = load_gt(name, args.gt_dir_target,
-                                  'train').cuda(args.gpu)
+                                  'train').cuda(args.gpu_eval)
             gt_trainIds = label_mapping(gt_labelIds, mapping)
 
             # torch.cuda.empty_cache()
@@ -692,31 +687,35 @@ def main(args):
 
             print('  '.join(
                 ['iter = {:8d}/{:8d}'.format(i_iter, args.num_steps),
-                 'loss_seg1 = {:.3f}'.format(loss_seg_value1),
-                 'loss_seg2 = {:.3f}'.format(loss_seg_value2),
-                 'loss_diff = {:.3f}'.format(loss_diff_value),
-                 'loss_seg_target1 = {:.3f}'.format(loss_seg_target1),
-                 'loss_seg_target2 = {:.3f}'.format(loss_seg_target2),
-                 'loss_seg_target3 = {:.3f}'.format(loss_seg_target3),
-                 'loss_seg_target4 = {:.3f}'.format(loss_seg_target4),
-                 ] + ['mIoU_target{:d} = {:.3f}'.format(i+1, m) for i, m in enumerate(mIoU)]
+                 'train/loss/seg_source1 = {:.3f}'.format(loss_seg_value1),
+                 'train/loss/seg_source2 = {:.3f}'.format(loss_seg_value2),
+                 'train/loss/diff = {:.3f}'.format(loss_diff_value),
+                 'train/loss/seg_target1 = {:.3f}'.format(
+                     loss_seg_target_value1),
+                 'train/loss/seg_target2 = {:.3f}'.format(
+                     loss_seg_target_value2),
+                 'train/loss/seg_target3 = {:.3f}'.format(
+                     loss_seg_target_value3),
+                 'train/loss/seg_target4 = {:.3f}'.format(
+                     loss_seg_target_value4),
+                 ] + ['train/mIoU/target{:d} = {:.3f}'.format(i+1, m) for i, m in enumerate(mIoU)]
             ))
             if args.use_wandb:
                 wandb.log({
-                    'loss_seg1': loss_seg_value1,
-                    'loss_seg2': loss_seg_value2,
-                    'loss_diff': loss_diff_value,
-                    'loss_seg_target1': loss_seg_target1,
-                    'loss_seg_target2': loss_seg_target2,
-                    'loss_seg_target3': loss_seg_target3,
-                    'loss_seg_target4': loss_seg_target4,
-                    'mIoU_target1': mIoU[0],
-                    'mIoU_target2': mIoU[1],
-                    'mIoU_target3': mIoU[2],
-                    'mIoU_target4': mIoU[3],
+                    'train/loss/seg1': loss_seg_value1,
+                    'train/loss/seg2': loss_seg_value2,
+                    'train/loss/diff': loss_diff_value,
+                    'train/loss/seg_target1': loss_seg_target_value1,
+                    'train/loss/seg_target2': loss_seg_target_value2,
+                    'train/loss/seg_target3': loss_seg_target_value3,
+                    'train/loss/seg_target4': loss_seg_target_value4,
+                    'train/mIoU/target1': mIoU[0],
+                    'train/mIoU/target2': mIoU[1],
+                    'train/mIoU/target3': mIoU[2],
+                    'train/mIoU/target4': mIoU[3],
                 }, step=i_iter)
                 wandb.log({
-                    '{}_IoU_target{}'.format(k, i+1): IoUs[i, idx] for idx, k in enumerate(name_classes) for i in range(4)
+                    'train/{}/IoU_target{}'.format(k, i+1): IoUs[i, idx] for idx, k in enumerate(name_classes) for i in range(4)
                 }, step=i_iter)
                 # }, step=i_iter)
 
@@ -740,7 +739,7 @@ def main(args):
             if args.use_wandb:
                 for name_class, df in pslabel_dfs.items():
                     wandb.log({
-                        'pslabel_{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
+                        'pslabel/{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
                         for top_p in policy_index
                         for filter_output in thr_columns
                     }, step=int(args.num_steps_stop))
@@ -761,14 +760,14 @@ def main(args):
             if args.use_wandb:
                 for name_class, df in dfs.items():
                     wandb.log({
-                        '{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
+                        'eval/{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
                         for top_p in policy_index
                         for filter_output in thr_columns
                     }, step=i_iter)
             if args.use_wandb:
                 for name_class, df in pslabel_dfs.items():
                     wandb.log({
-                        'pslabel_{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
+                        'eval/pslabel/{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
                         for top_p in policy_index
                         for filter_output in thr_columns
                     }, step=i_iter)

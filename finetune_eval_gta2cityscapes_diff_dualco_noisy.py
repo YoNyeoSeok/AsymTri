@@ -1,3 +1,4 @@
+from packaging import version
 import argparse
 import time
 import torch
@@ -74,7 +75,9 @@ SAVE_PRED_EVERY = 100  # 5000, 600
 SNAPSHOT_DIR = './snapshots_diff_dualco/'
 WEIGHT_DECAY = 0.001
 
-LAMBDA_TARGET = [.0, .0, 1., .0]
+# LAMBDA_TARGET = [.0, .0, 1., .0]
+LAMBDA_TARGET_LOSS_CONST = [.0, .0, .25, .25, .0, .0, .25, .25]
+LAMBDA_CONST = [.5, .5]
 
 ORTH = []
 NORM = 2
@@ -128,8 +131,10 @@ def get_arguments():
                         help="Path to the file listing the images in the target gt dataset.")
     parser.add_argument("--input-size-target-gt", type=str, default=INPUT_SIZE_TARGET_GT,
                         help="Comma-separated string with height and width of target gt images.")
-    parser.add_argument('--lambda_target', type=float, nargs=4, default=LAMBDA_TARGET,
-                        help="lambda_target for classifier losses of target domain.")
+    # parser.add_argument('--lambda_target', type=float, nargs=4, default=LAMBDA_TARGET,
+    #                     help="lambda_target for classifier losses of target domain.")
+    parser.add_argument('--lambda_target_loss_const', type=float, nargs=8, default=LAMBDA_TARGET_LOSS_CONST,
+                        help="lambda_target_loss_const for classifier losses and contrastive loss of target domain.")
     parser.add_argument('--orth', type=int, nargs='*', default=ORTH,
                         choices=[1, 2, 3],
                         help="orthogonal dimension for weight difference."
@@ -571,10 +576,30 @@ def main(args):
                 poten1234))
             loss_seg_target1, loss_seg_target2, loss_seg_target3, loss_seg_target4 = loss_seg_target1234
 
+            # contrastive loss
+            if version.parse(torch.__version__) >= version.parse("1.6.0"):
+                loss_con_target12 = nn.KLDivLoss(
+                    log_target=True)(poten1234[0], poten1234[1])
+                loss_con_target21 = nn.KLDivLoss(
+                    log_target=True)(poten1234[1], poten1234[0])
+                loss_con_target34 = nn.KLDivLoss(
+                    log_target=True)(poten1234[-2], poten1234[-1])
+                loss_con_target43 = nn.KLDivLoss(
+                    log_target=True)(poten1234[-1], poten1234[-2])
+            else:
+                pred1234 = F.softmax(poten1234, dim=-3)
+                loss_con_target12 = nn.KLDivLoss()(poten1234[0], pred1234[1])
+                loss_con_target21 = nn.KLDivLoss()(poten1234[1], pred1234[0])
+                loss_con_target34 = nn.KLDivLoss()(poten1234[-2], pred1234[-1])
+                loss_con_target43 = nn.KLDivLoss()(poten1234[-1], pred1234[-2])
+
             loss = sum(list(map(
                 lambda l, loss: l*loss,
-                args.lambda_target, loss_seg_target1234
+                args.lambda_target_loss_const,
+                [*loss_seg_target1234,
+                 loss_con_target12, loss_con_target21, loss_con_target34, loss_con_target43]
             )))
+
             loss = loss / args.iter_size
             loss.backward()
             loss_seg_target_value1 += loss_seg_target1.detach().cpu().numpy() / \

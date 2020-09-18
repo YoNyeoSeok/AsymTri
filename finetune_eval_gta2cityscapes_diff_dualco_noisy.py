@@ -563,6 +563,52 @@ def main(args):
                     policy_index.index(args.pslabel_policy),
                     thr_columns.index(threshold)]
 
+            model.eva()
+            with torch.no_grad():
+                output1234 = torch.cat(model(images))
+                # 4xBxCxWxH
+                poten1234 = interp_target(output1234)
+                poten1234 = poten1234.reshape(4, -1, *poten1234.shape[1:])
+
+                loss_seg_target1234 = list(map(
+                    lambda poten: CrossEntropy2d(
+                        reduction='none', ignore_label=args.ignore_label)(poten, pslabel),
+                    # lambda pred_target: loss_calc(
+                    #     pred_target, pslabel, args.ignore_label, args.gpu),
+                    poten1234))
+                loss_seg_target1, loss_seg_target2, loss_seg_target3, loss_seg_target4 = loss_seg_target1234
+
+                # contrastive loss
+                if version.parse(torch.__version__) >= version.parse("1.6.0"):
+                    loss_con_target12 = nn.KLDivLoss(
+                        reduction='none', log_target=True)(poten1234[0], poten1234[1])
+                    loss_con_target21 = nn.KLDivLoss(
+                        reduction='none', log_target=True)(poten1234[1], poten1234[0])
+                    loss_con_target34 = nn.KLDivLoss(
+                        reduction='none', log_target=True)(poten1234[-2], poten1234[-1])
+                    loss_con_target43 = nn.KLDivLoss(
+                        reduction='none', log_target=True)(poten1234[-1], poten1234[-2])
+                else:
+                    pred1234 = F.softmax(poten1234, dim=-3)
+                    loss_con_target12 = nn.KLDivLoss(
+                        reduction='none')(poten1234[0], pred1234[1])
+                    loss_con_target21 = nn.KLDivLoss(
+                        reduction='none')(poten1234[1], pred1234[0])
+                    loss_con_target34 = nn.KLDivLoss(
+                        reduction='none')(poten1234[-2], pred1234[-1])
+                    loss_con_target43 = nn.KLDivLoss(
+                        reduction='none')(poten1234[-1], pred1234[-2])
+
+                loss = sum(list(map(
+                    lambda l, loss: l*loss,
+                    args.lambda_target_loss_const,
+                    [*loss_seg_target1234,
+                     loss_con_target12, loss_con_target21, loss_con_target34, loss_con_target43]
+                )))
+
+                sample_select = loss == loss
+
+            model.train()
             output1234 = torch.cat(model(images))
             # 4xBxCxWxH
             poten1234 = interp_target(output1234)
@@ -570,7 +616,7 @@ def main(args):
 
             loss_seg_target1234 = list(map(
                 lambda poten: CrossEntropy2d(
-                    ignore_label=args.ignore_label)(poten, pslabel),
+                    reduction='none', ignore_label=args.ignore_label)(poten, pslabel),
                 # lambda pred_target: loss_calc(
                 #     pred_target, pslabel, args.ignore_label, args.gpu),
                 poten1234))
@@ -579,25 +625,29 @@ def main(args):
             # contrastive loss
             if version.parse(torch.__version__) >= version.parse("1.6.0"):
                 loss_con_target12 = nn.KLDivLoss(
-                    log_target=True)(poten1234[0], poten1234[1])
+                    reduction='none', log_target=True)(poten1234[0], poten1234[1])
                 loss_con_target21 = nn.KLDivLoss(
-                    log_target=True)(poten1234[1], poten1234[0])
+                    reduction='none', log_target=True)(poten1234[1], poten1234[0])
                 loss_con_target34 = nn.KLDivLoss(
-                    log_target=True)(poten1234[-2], poten1234[-1])
+                    reduction='none', log_target=True)(poten1234[-2], poten1234[-1])
                 loss_con_target43 = nn.KLDivLoss(
-                    log_target=True)(poten1234[-1], poten1234[-2])
+                    reduction='none', log_target=True)(poten1234[-1], poten1234[-2])
             else:
                 pred1234 = F.softmax(poten1234, dim=-3)
-                loss_con_target12 = nn.KLDivLoss()(poten1234[0], pred1234[1])
-                loss_con_target21 = nn.KLDivLoss()(poten1234[1], pred1234[0])
-                loss_con_target34 = nn.KLDivLoss()(poten1234[-2], pred1234[-1])
-                loss_con_target43 = nn.KLDivLoss()(poten1234[-1], pred1234[-2])
+                loss_con_target12 = nn.KLDivLoss(
+                    reduction='none')(poten1234[0], pred1234[1])
+                loss_con_target21 = nn.KLDivLoss(
+                    reduction='none')(poten1234[1], pred1234[0])
+                loss_con_target34 = nn.KLDivLoss(
+                    reduction='none')(poten1234[-2], pred1234[-1])
+                loss_con_target43 = nn.KLDivLoss(
+                    reduction='none')(poten1234[-1], pred1234[-2])
 
             loss = sum(list(map(
-                lambda l, loss: l*loss,
+                lambda l, loss: l*loss[sample_select],
                 args.lambda_target_loss_const,
                 [*loss_seg_target1234,
-                 loss_con_target12, loss_con_target21, loss_con_target34, loss_con_target43]
+                    loss_con_target12, loss_con_target21, loss_con_target34, loss_con_target43]
             )))
 
             loss = loss / args.iter_size

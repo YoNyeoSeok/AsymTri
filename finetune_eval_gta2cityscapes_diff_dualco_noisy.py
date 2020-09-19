@@ -73,7 +73,7 @@ RESTORE_FROM = 'http://vllab.ucmerced.edu/ytsai/CVPR18/DeepLab_resnet_pretrained
 RESTORE_FROM_PSLABEL = '9ab2hb8f/GTA5_70000.pth'
 SAVE_NUM_IMAGES = 2
 SAVE_PRED_EVERY = 100  # 5000, 600
-SNAPSHOT_DIR = './snapshots_diff_dualco/'
+SNAPSHOT_DIR = './snapshots_diff_dualco_noisy/'
 WEIGHT_DECAY = 0.001
 
 WEIGHT_DIFF_ORTH = []
@@ -309,7 +309,7 @@ def eval_model(model, policy_index, thr_columns, threshold, num_classes, name_cl
 
             # del filtered_pred_1_2_1and2_1or2_3_4_3and4_3or4, IoUs, mIoU
             # torch.cuda.empty_cache()
-            break
+            # break
         dfs = {}
         for ind_class in range(num_classes):
             name_class = name_classes[ind_class]
@@ -655,10 +655,10 @@ def main(args):
                     selected_sample_3, selected_sample_4, selected_sample_3and4 = filtered_small_loss_3_4_3and4_3or4[
                         :3,
                         thr_columns.index(clsample_thld)]
-                    selected_sample_only3 = selected_sample_3 * \
-                        (~selected_sample_3and4)
-                    selected_sample_only4 = selected_sample_4 * \
-                        (~selected_sample_3and4)
+                    selected_sample_only3 = (selected_sample_3 != args.ignore_label) * \
+                        (~(selected_sample_3and4 != args.ignore_label))
+                    selected_sample_only4 = (selected_sample_4 != args.ignore_label) * \
+                        (~(selected_sample_3and4 != args.ignore_label))
                     selected_samples = [
                         torch.zeros_like(selected_sample_3).bool(),
                         torch.zeros_like(selected_sample_3).bool(),
@@ -824,5 +824,5 @@ def main(args):
 
 if __name__ == '__main__':
     args = get_arguments()
-
+    print(args)
     main(args)

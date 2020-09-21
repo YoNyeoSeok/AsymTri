@@ -633,28 +633,40 @@ def main(args):
                         selected_samples = [selected_sample]*4
 
                 elif args.clsample_policy == 'CoTeaching_plus_34':
-                    # 8xNxBxWxH
-                    filtered_small_loss_3_4_3and4_3or4 = torch.cat(list(map(
-                        # 4xNxBxWxH
-                        lambda igc: compute_filtered_output_a_b_and_or(
-                            torch.stack(loss_seg_target1234[-2:]),
-                            poten1234[-2:].argmax(2),
-                            ignore_label=args.ignore_label, C=num_classes, N=10, ignore_class=igc),
-                        [True, False]
-                    )))
+                    poten1234_mask = (pslabel != args.ignore_label)[None, :, None, :, :] \
+                        + (poten1234.argmax(2, keepdim=True) ==
+                           torch.arange(num_classes).to(args.gpu)[None, None, :, None, None])
+                    loss1234 = torch.stack(loss_seg_target1234)[
+                        :, :, None, :, :].repeat(1, 1, num_classes, 1, 1)
+                    masked_fill_loss1234 = loss1234.masked_fill(
+                        ~poten1234_mask, float('-inf'))
+                    sorted_loss1234 = masked_fill_loss1234.flatten(
+                        -2).sort(-1, descending=True)[0]
+                    sum_poten1234 = poten1234_mask.flatten(
+                        -2).sum(-1, keepdim=True)
+                    loss1234_quantile = sorted_loss1234.gather(
+                        -1, (sum_poten1234.float()*0.5).round().long())
 
-                    selected_sample_3, selected_sample_4, selected_sample_3and4 = filtered_small_loss_3_4_3and4_3or4[
-                        :3,
-                        thr_columns.index(clsample_thld)]
-                    selected_sample_only3 = (selected_sample_3 != args.ignore_label) * \
+                    poten1234_thld_mask = loss1234 < loss1234_quantile.unsqueeze(
+                        -1)
+                    pred1234 = poten1234.argmax(2)
+                    pred1234_filtered = pred1234.masked_fill(
+                        poten1234_thld_mask.gather(
+                            2, pred1234.unsqueeze(2)).squeeze(2),
+                        float(args.ignore_label))
+
+                    selected_sample_3, selected_sample_4 = pred1234_filtered[2:]
+                    selected_sample_3and4 = selected_sample_3.masked_fill(
+                        selected_sample_3 != selected_sample_4, float(args.ignore_label))
+                    selected_sample_for3 = (selected_sample_4 != args.ignore_label) * \
                         (~(selected_sample_3and4 != args.ignore_label))
-                    selected_sample_only4 = (selected_sample_4 != args.ignore_label) * \
+                    selected_sample_for4 = (selected_sample_3 != args.ignore_label) * \
                         (~(selected_sample_3and4 != args.ignore_label))
                     selected_samples = [
                         torch.zeros_like(selected_sample_3).bool(),
                         torch.zeros_like(selected_sample_3).bool(),
-                        selected_sample_only3,
-                        selected_sample_only4,
+                        selected_sample_for3,
+                        selected_sample_for4,
                     ]
 
             if args.is_training:
@@ -681,7 +693,15 @@ def main(args):
                 selected_samples,
             )))
 
-            loss = loss_seg_target1 + loss_seg_target2 + loss_seg_target3 + loss_seg_target4
+            loss = 0
+            if not torch.isnan(loss_seg_target1):
+                loss += loss_seg_target1
+            if not torch.isnan(loss_seg_target2):
+                loss += loss_seg_target2
+            if not torch.isnan(loss_seg_target3):
+                loss += loss_seg_target3
+            if not torch.isnan(loss_seg_target4):
+                loss += loss_seg_target4
 
             loss = loss / args.iter_size
             loss.backward()

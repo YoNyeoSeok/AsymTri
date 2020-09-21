@@ -438,8 +438,6 @@ def main(args):
                                        batch_size=args.batch_size*1, shuffle=False,
                                        #    pin_memory=True
                                        )
-    testtargetloader_iter = enumerate(testtargetloader)
-
     interp = nn.Upsample(
         size=(input_size[1], input_size[0]),
         mode='bilinear', align_corners=False)
@@ -780,17 +778,21 @@ def main(args):
                 # }, step=i_iter)
                 # }, step=i_iter)
 
-            with torch.no_grad():
-                try:
-                    _, batch = next(testtargetloader_iter)
-                except StopIteration:
-                    testtargetloader_iter = iter(testtargetloader)
-                    _, batch = next(testtargetloader_iter)
+            if (i_iter-1) % len(testtargetloader) == 0:
+                testtargetloader_iter = iter(testtargetloader)
+            batch = next(testtargetloader_iter)
 
+            # try:
+            #     _, batch = next(testtargetloader_iter)
+            # except StopIteration:
+            #     testtargetloader_iter = iter(testtargetloader)
+            #     _, batch = next(testtargetloader_iter)
+
+            with torch.no_grad():
                 eval_hist[(i_iter-1) % len(testtargetloader)] = eval_batch(
                     model, num_classes, batch, mapping, interp_target_gt, args.gpu_eval)
             IoUs = per_class_iu_batch(
-                eval_hist[:(i_iter-1)].sum(0)).cpu().numpy()
+                eval_hist[:i_iter].sum(0)).cpu().numpy()
             mIoU = np.nanmean(IoUs, -1)
 
             dfs = {}

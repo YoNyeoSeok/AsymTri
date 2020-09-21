@@ -145,3 +145,6 @@ psLabel
 
 # dualco
 snapshots_dualco
+
+# difF_dualco_noisy
+snapshots_diff_dualco_noisy

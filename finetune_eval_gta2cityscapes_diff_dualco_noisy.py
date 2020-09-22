@@ -494,13 +494,13 @@ def main(args):
             optimizer.step()
 
             del batch, images, output1234, loss_seg1, loss_seg2, loss_diff, loss
-            # torch.cuda.empty_cache()
 
             # train with target
             optimizer.zero_grad()
             _, batch = next(targetloader_iter)
             images, _, name = batch
             images = images.cuda(args.gpu_eval)
+            # print('target', torch.cuda.memory_summary())
 
             # get pseudo-label
             prev_model.eval()
@@ -535,7 +535,10 @@ def main(args):
                     thr_columns.index(threshold)]
                 del pm_poten1234, pm_prob1234, pm_confid1234, pm_pred1234
                 del filtered_pm_pred_1_2_1and2_1or2_3_4_3and4_3or4
+            # print('get pseudo-label', torch.cuda.memory_summary())
 
+            images = images.cuda(args.gpu)
+            pslabel = pslabel.cuda(args.gpu)
             # get clean label from pseudo-label
             model.eval()
             with torch.no_grad():
@@ -617,8 +620,7 @@ def main(args):
                             2, pred34.unsqueeze(2)).squeeze(2),
                         float(args.ignore_label))
                     del loss34_thld_mask, pred34
-
-                selected_sample_3, selected_sample_4 = pred34_filtered
+                # pred34_filtered
 
                 if 'plus' in args.clsample_policy:
                     # minus
@@ -638,21 +640,22 @@ def main(args):
                     selected_sample_for3, selected_sample_for4 = \
                         (mat_selected_sample_minus !=
                             args.ignore_label).sum(dim=1).bool()
-                    selected_samples = [
-                        selected_sample_for3,
-                        selected_sample_for4,
-                    ]
                     del mat_selected_sample_and, mat_selected_sample_minus
                 else:
-                    selected_samples = [
-                        selected_sample_3,
-                        selected_sample_4,
-                    ]
+                    selected_sample_for3, selected_sample_for4 = list(map(
+                        lambda pf: pf != args.ignore_label,
+                        pred34_filtered,
+                    ))
+                selected_samples = [
+                    selected_sample_for3,
+                    selected_sample_for4,
+                ]
 
                 del output34, poten34, log_prob34, prob34
                 del loss34, mask34
                 del masked_fill_loss34, sorted_loss34, mask_sum34, loss34_quantile
-                del pred34_filtered, selected_sample_3, selected_sample_4
+                del pred34_filtered
+            # print('get clean-label', torch.cuda.memory_summary())
 
             # train with clean label
             if args.is_training:
@@ -660,8 +663,6 @@ def main(args):
             else:
                 model.eval()
 
-            images = images.cuda(args.gpu)
-            pslabel = pslabel.cuda(args.gpu)
             output1234 = torch.cat(model(images))
             # 4xBxCxWxH
             poten1234 = interp_target(output1234)
@@ -689,8 +690,9 @@ def main(args):
                 loss_seg_target1234[2:] = loss34
                 del log_prob34, prob34, kldiv_loss, loss_mat, loss34
 
+            # print('train clean-label', torch.cuda.memory_summary())
             loss_seg_target1234 = list(map(
-                lambda a, l, s: a*(l if s else l[s]).mean(),
+                lambda a, l, s: a*l[s].mean(),
                 args.lambda_target,
                 loss_seg_target1234,
                 [True, True] + selected_samples,

@@ -296,43 +296,6 @@ def eval_batch(model, num_classes, batch, mapping, interp_target_gt, gpu):
     return hist
 
 
-def eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
-               testtargetloader, mapping, interp_target_gt, gpu):
-    model.cuda(gpu)
-    model.eval()
-    hist = torch.zeros(
-        (len(policy_index), len(thr_columns), num_classes, num_classes)).cuda(gpu)
-    with torch.no_grad():
-        for ind, batch in enumerate(testtargetloader):
-            hist += eval_batch(model, num_classes, batch,
-                               mapping, interp_target_gt, gpu)
-            t = time.time()
-            # 16xNx19
-            IoUs = per_class_iu_batch(hist).cpu().numpy()
-            mIoU = np.nanmean(IoUs, -1)
-            ct = time.time()-t
-
-            print('[{:4d}/{:4d}]===> {} ({}, {}):\t {:.2f}'.format(
-                ind, len(testtargetloader), 'mIoU', args.pslabel_policy, threshold,
-                100*mIoU[policy_index.index(args.pslabel_policy), thr_columns.index(threshold)]))
-            # tt = at+bt+ct
-            # print(at+bt+ct, at/tt, bt/tt, ct/tt)
-
-            # del filtered_pred_1_2_1and2_1or2_3_4_3and4_3or4, IoUs, mIoU
-            # torch.cuda.empty_cache()
-            # break
-        dfs = {}
-        for ind_class in range(num_classes):
-            name_class = name_classes[ind_class]
-            df = pd.DataFrame(IoUs[:, :, ind_class],
-                              index=policy_index, columns=thr_columns)
-            dfs.update({name_class: df})
-        df = pd.DataFrame(mIoU, index=policy_index, columns=thr_columns)
-        dfs.update({'mIoU': df})
-
-    return dfs
-
-
 def main(args):
     """Create the model and start the training."""
 
@@ -373,7 +336,7 @@ def main(args):
             model.eval()
         model.cuda(args.gpu)
         prev_model.eval()
-        prev_model.cuda(args.gpu)
+        prev_model.cuda(args.gpu_eval)
 
         if args.restore_from[:4] == 'http':
             saved_state_dict = model_zoo.load_url(
@@ -508,7 +471,6 @@ def main(args):
             poten1234 = interp(output1234)
             # 4xBxCxWxH
             poten1234 = poten1234.reshape(4, -1, *poten1234.shape[1:])
-            # pred1234 = F.softmax(poten1234, -3)
             # 4xBxWxH
 
             loss_seg1, loss_seg2, _, _ = list(map(
@@ -531,7 +493,7 @@ def main(args):
             loss_diff_value += loss_diff.detach().cpu().numpy() / args.iter_size
             optimizer.step()
 
-            # del images, output1234, pred1234, loss_seg1, loss_seg2, loss_diff, loss
+            del batch, images, output1234, loss_seg1, loss_seg2, loss_diff, loss
             # torch.cuda.empty_cache()
 
             # train with target
@@ -540,6 +502,7 @@ def main(args):
             images, _, name = batch
             images = images.cuda(args.gpu_eval)
 
+            # get pseudo-label
             prev_model.eval()
             with torch.no_grad():
                 # 4BxCxWxH
@@ -573,9 +536,7 @@ def main(args):
                 del pm_poten1234, pm_prob1234, pm_confid1234, pm_pred1234
                 del filtered_pm_pred_1_2_1and2_1or2_3_4_3and4_3or4
 
-            # clean label
-            images = images.cuda(args.gpu)
-            pslabel = pslabel.cuda(args.gpu)
+            # get clean label from pseudo-label
             model.eval()
             with torch.no_grad():
                 output34 = torch.cat(model(images))[2:]
@@ -591,7 +552,6 @@ def main(args):
                     # lambda pred_target: loss_calc(
                     #     pred_target, pslabel, args.ignore_label, args.gpu),
                     poten34))
-                loss_seg_target3, loss_seg_target4 = loss_seg_target34
 
                 if 'JoCoR' in args.clsample_policy:
                     # KLDivLoss(x,y) = y * [log(y) - log(x)] = KL[y|x]
@@ -683,7 +643,6 @@ def main(args):
                         selected_sample_for4,
                     ]
                     del mat_selected_sample_and, mat_selected_sample_minus
-                    del selected_sample_for3, selected_sample_for4
                 else:
                     selected_samples = [
                         selected_sample_3,
@@ -693,51 +652,16 @@ def main(args):
                 del output34, poten34, log_prob34, prob34
                 del loss34, mask34
                 del masked_fill_loss34, sorted_loss34, mask_sum34, loss34_quantile
-                del selected_sample_3, selected_sample_4
+                del pred34_filtered, selected_sample_3, selected_sample_4
 
-                if 'CoTeaching' in args.clsample_policy:
-                    pass
-                    # poten1234_mask = (pslabel != args.ignore_label)[None, :, None, :, :] \
-                    #     + (poten1234.argmax(2, keepdim=True) ==
-                    #        torch.arange(num_classes).to(args.gpu)[None, None, :, None, None])
-                    # loss1234 = torch.stack(loss_seg_target1234)[
-                    #     :, :, None, :, :].repeat(1, 1, num_classes, 1, 1)
-                    # masked_fill_loss1234 = loss1234.masked_fill(
-                    #     ~poten1234_mask, float('-inf'))
-                    # sorted_loss1234 = masked_fill_loss1234.flatten(
-                    #     -2).sort(-1, descending=True)[0]
-                    # sum_poten1234 = poten1234_mask.flatten(
-                    #     -2).sum(-1, keepdim=True)
-                    # loss1234_quantile = sorted_loss1234.gather(
-                    #     -1, (sum_poten1234.float()*0.5).round().long())
-
-                    # poten1234_thld_mask = loss1234 < loss1234_quantile.unsqueeze(
-                    #     -1)
-                    # pred1234 = poten1234.argmax(2)
-                    # pred1234_filtered = pred1234.masked_fill(
-                    #     poten1234_thld_mask.gather(
-                    #         2, pred1234.unsqueeze(2)).squeeze(2),
-                    #     float(args.ignore_label))
-
-                    # selected_sample_3, selected_sample_4 = pred1234_filtered[2:]
-                    # selected_sample_3and4 = selected_sample_3.masked_fill(
-                    #     selected_sample_3 != selected_sample_4, float(args.ignore_label))
-                    # selected_sample_for3 = (selected_sample_4 != args.ignore_label) * \
-                    #     (~(selected_sample_3and4 != args.ignore_label))
-                    # selected_sample_for4 = (selected_sample_3 != args.ignore_label) * \
-                    #     (~(selected_sample_3and4 != args.ignore_label))
-                    # selected_samples = [
-                    #     torch.zeros_like(selected_sample_3).bool(),
-                    #     torch.zeros_like(selected_sample_3).bool(),
-                    #     selected_sample_for3,
-                    #     selected_sample_for4,
-                    # ]
-
+            # train with clean label
             if args.is_training:
                 model.train()
             else:
                 model.eval()
 
+            images = images.cuda(args.gpu)
+            pslabel = pslabel.cuda(args.gpu)
             output1234 = torch.cat(model(images))
             # 4xBxCxWxH
             poten1234 = interp_target(output1234)
@@ -760,13 +684,13 @@ def main(args):
                 ]).reshape(2, 2, *prob34.shape[1:])
                 loss_mat = kldiv_loss * torch.from_numpy(np.array(
                     args.lambda_clean_sample)).float().cuda(args.gpu)[:, :, None, None, None, None]
-                loss34 = loss_mat.sum(1).sum(2, keepdim=True)
+                loss34 = loss_mat.sum(1).sum(2)
 
-                loss_seg_target1234[:2] = loss34
+                loss_seg_target1234[2:] = loss34
                 del log_prob34, prob34, kldiv_loss, loss_mat, loss34
 
             loss_seg_target1234 = list(map(
-                lambda a, l, s: a*l[s].mean(),
+                lambda a, l, s: a*(l if s else l[s]).mean(),
                 args.lambda_target,
                 loss_seg_target1234,
                 [True, True] + selected_samples,
@@ -793,11 +717,11 @@ def main(args):
 
             optimizer.step()
 
+            # train metric
             gt_labelIds = load_gt(name, args.gt_dir_target,
                                   'train').cuda(args.gpu_eval)
             gt_trainIds = label_mapping(gt_labelIds, mapping)
 
-            # torch.cuda.empty_cache()
             with torch.no_grad():
                 # 4BxCxWxH
                 pm_poten1234 = interp_target_gt(pm_output1234)
@@ -858,6 +782,7 @@ def main(args):
                 # }, step=i_iter)
                 # }, step=i_iter)
 
+            # running eval
             with torch.no_grad():
                 try:
                     _, batch = next(testtargetloader_iter)

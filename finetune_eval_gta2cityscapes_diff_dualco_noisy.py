@@ -547,27 +547,30 @@ def main(args):
                 log_prob34 = F.log_softmax(poten34, dim=-3)
                 prob34 = F.softmax(poten34, dim=-3)
 
-                loss_seg_target34 = list(map(
-                    lambda poten: nn.CrossEntropyLoss(
-                        reduction='none', ignore_index=args.ignore_label)(poten, pslabel),
-                    # lambda pred_target: loss_calc(
-                    #     pred_target, pslabel, args.ignore_label, args.gpu),
-                    poten34))
-
                 if 'JoCoR' in args.clsample_policy:
+                    onehot_pslabel = pslabel[:, None] == torch.arange(
+                        num_classes)[None, :, None, None].to(args.gpu)
                     # KLDivLoss(x,y) = y * [log(y) - log(x)] = KL[y|x]
                     kldiv_loss = torch.stack([
                         nn.KLDivLoss(reduction='none')(lp1, p2)
                         if e1 != e2 else
                         nn.KLDivLoss(reduction='none')(
-                            lp1, (pslabel[:, None] == torch.arange(num_classes)[None, :, None, None].to(args.gpu)).float())
-                        for e1, lp1 in enumerate(log_prob34) for e2, p2 in enumerate(prob34)
-                    ]).reshape(2, 2, *prob34.shape[1:])
+                            lp1, onehot_pslabel.float())
+                        for e1, lp1 in enumerate(log_prob34)
+                        for e2, p2 in enumerate(prob34)
+                    ]).reshape(2, 2, *prob34.shape[1:]).sum(3)
                     loss_mat = kldiv_loss * torch.from_numpy(np.array(
-                        args.lambda_clean_sample)).float().cuda(args.gpu)[:, :, None, None, None, None]
-                    loss34 = loss_mat.sum(1).sum(2)
+                        args.lambda_clean_sample))[:, :, None, None, None].cuda(args.gpu).float()
+                    loss34 = loss_mat.sum(1)
                     del kldiv_loss, loss_mat
                 elif 'CoTeaching' in args.clsample_policy:
+                    loss_seg_target34 = list(map(
+                        lambda poten: nn.CrossEntropyLoss(
+                            reduction='none', ignore_index=args.ignore_label)(poten, pslabel),
+                        # lambda pred_target: loss_calc(
+                        #     pred_target, pslabel, args.ignore_label, args.gpu),
+                        poten34))
+
                     loss34 = torch.stack(loss_seg_target34)
                 else:
                     raise NotImplementedError
@@ -578,7 +581,7 @@ def main(args):
                     loss34 = loss34.unsqueeze(2).repeat(
                         1, 1, num_classes, 1, 1)
                     mask34 = (pslabel != args.ignore_label)[None, :, None, :, :] \
-                        + (prob34.argmax(2, keepdim=True) ==
+                        * (prob34.argmax(2, keepdim=True) ==
                             torch.arange(num_classes).to(args.gpu)[None, None, :, None, None])
                 elif 'plus' in args.clsample_policy:
                     # ignore class
@@ -589,7 +592,7 @@ def main(args):
                     loss34 = loss34.unsqueeze(2).sum(0, keepdim=True).repeat(
                         2, 1, num_classes, 1, 1)
                     mask34 = (pslabel != args.ignore_label)[None, :, None, :, :] \
-                        + (prob34.argmax(2, keepdim=True) ==
+                        * (prob34.argmax(2, keepdim=True) ==
                             torch.arange(num_classes).to(args.gpu)[None, None, :, None, None])
                 else:
                     # ignore class, ignore classifier

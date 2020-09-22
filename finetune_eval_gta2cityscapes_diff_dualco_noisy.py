@@ -78,16 +78,21 @@ WEIGHT_DECAY = 0.001
 
 WEIGHT_DIFF_ORTH = []
 WEIGHT_DIFF_NORM = 2
-LAMBDA_DIFF = [0.5, 0.5]
+LAMBDA_DIFF = [1., 1.]
 
 PSEUDO_LABEL_THRESHOLD = '10,90_100'
 PSEUDO_LABEL_POLICY = 'per_class_1and2'
 
 CLEAN_SAMPLE_THRESHOLD = '10,90_100'
 CLEAN_SAMPLE_POLICY = 'JoCoR_34'
-LAMBDA_CLEAN_SAMPLE = [[.25, .25],
-                       [.25, .25], ]
-LAMBDA_TARGET = [.25, .25, .25, .25]
+LAMBDA_CLEAN_SAMPLE = [[1., 1.],
+                       [1., 1.], ]
+LAMBDA_CLEAN_SAMPLE_REG = [[1., 1.],
+                           [1., 1.], ]
+LAMBDA_CLEAN_SAMPLE_SEL = [[-1, 1],
+                           [1, -1], ]
+
+LAMBDA_TARGET = [1., 1., 1., 1.]
 
 TARGET = 'cityscapes'
 
@@ -139,11 +144,11 @@ def get_arguments():
     parser.add_argument('--pslabel-threshold', type=str, default=PSEUDO_LABEL_THRESHOLD,
                         help="pseudo label threshold. ('10,00_100' ~ '10,90_100')")
     parser.add_argument('--pslabel-policy', type=str, default=PSEUDO_LABEL_POLICY,
-                        help="pslabel policy (a, b, per_class_a, per_class_b, aandb, aorb for a, b in [[1, 2], [3, 4]]), default: per_class_1and2.")
+                        help="pslabel policy (1, 2, 1and2, 1or2, per_class_1, per_class_2, per_class_1and2, per_class_1or2), default: per_class_1and2.")
     parser.add_argument('--clsample-threshold', type=str, default=CLEAN_SAMPLE_THRESHOLD,
                         help="clean sample threshold. ('10,00_100' ~ '10,90_100')")
     parser.add_argument('--clsample-policy', type=str, default=CLEAN_SAMPLE_POLICY,
-                        help="clean label policy (DeCouple_ab, CoTeaching_ab, CoTeaching_plus_ab, JoCoR_ab for a, b in [[1, 2], [3, 4]]), default: JoCoR_34.")
+                        help="clean label policy (DeCouple_34, CoTeaching_(plus_)(cls_)34, JoCoR_(plus_)(cls_)34), default: JoCoR_34.")
     parser.add_argument('--lambda-clean-sample', action='append', nargs='+', type=float, default=LAMBDA_CLEAN_SAMPLE,
                         help="param for clean sample policy")
     parser.add_argument('--lambda_target', type=float, nargs=4, default=LAMBDA_TARGET,
@@ -395,12 +400,13 @@ def main(args):
         saved_state_dict.update([
             (k, v) for k, v in model.state_dict().items() if k not in saved_state_dict])
         model.load_state_dict(saved_state_dict)
-
+        del saved_state_dict
         prev_state_dict = torch.load(
             args.restore_from_pslabel, map_location=torch.device(args.gpu))
         prev_state_dict.update([
             (k, v) for k, v in model.state_dict().items() if k not in prev_state_dict])
         prev_model.load_state_dict(prev_state_dict)
+        del prev_state_dict
     else:
         raise NotImplementedError(
             "wrong model name: {}".format(args.model))
@@ -564,110 +570,168 @@ def main(args):
                 pslabel = filtered_pm_pred_1_2_1and2_1or2_3_4_3and4_3or4[
                     policy_index.index(args.pslabel_policy),
                     thr_columns.index(threshold)]
+                del pm_poten1234, pm_prob1234, pm_confid1234, pm_pred1234
+                del filtered_pm_pred_1_2_1and2_1or2_3_4_3and4_3or4
 
+            # clean label
             images = images.cuda(args.gpu)
             pslabel = pslabel.cuda(args.gpu)
             model.eval()
             with torch.no_grad():
-                output1234 = torch.cat(model(images))
+                output34 = torch.cat(model(images))[2:]
                 # 4xBxCxWxH
-                poten1234 = interp_target(output1234)
-                poten1234 = poten1234.reshape(4, -1, *poten1234.shape[1:])
+                poten34 = interp_target(output34)
+                poten34 = poten34.reshape(2, -1, *poten34.shape[1:])
+                log_prob34 = F.log_softmax(poten34, dim=-3)
+                prob34 = F.softmax(poten34, dim=-3)
 
-                loss_seg_target1234 = list(map(
+                loss_seg_target34 = list(map(
                     lambda poten: nn.CrossEntropyLoss(
                         reduction='none', ignore_index=args.ignore_label)(poten, pslabel),
                     # lambda pred_target: loss_calc(
                     #     pred_target, pslabel, args.ignore_label, args.gpu),
-                    poten1234))
-                loss_seg_target1, loss_seg_target2, loss_seg_target3, loss_seg_target4 = loss_seg_target1234
+                    poten34))
+                loss_seg_target3, loss_seg_target4 = loss_seg_target34
 
                 if 'JoCoR' in args.clsample_policy:
-                    if version.parse(torch.__version__) >= version.parse("1.6.0"):
-                        loss_con_target12 = nn.KLDivLoss(
-                            reduction='none', log_target=True)(poten1234[0], poten1234[1])
-                        loss_con_target21 = nn.KLDivLoss(
-                            reduction='none', log_target=True)(poten1234[1], poten1234[0])
-                        loss_con_target34 = nn.KLDivLoss(
-                            reduction='none', log_target=True)(poten1234[-2], poten1234[-1])
-                        loss_con_target43 = nn.KLDivLoss(
-                            reduction='none', log_target=True)(poten1234[-1], poten1234[-2])
-                    else:
-                        pred1234 = F.softmax(poten1234, dim=-3)
-                        loss_con_target12 = nn.KLDivLoss(
-                            reduction='none')(poten1234[0], pred1234[1])
-                        loss_con_target21 = nn.KLDivLoss(
-                            reduction='none')(poten1234[1], pred1234[0])
-                        loss_con_target34 = nn.KLDivLoss(
-                            reduction='none')(poten1234[-2], pred1234[-1])
-                        loss_con_target43 = nn.KLDivLoss(
-                            reduction='none')(poten1234[-1], pred1234[-2])
-                    # contrastive loss
-                    if args.clsample_policy == 'JoCoR_34':
-                        loss = sum(list(map(
-                            lambda l, loss: l*loss,
-                            np.array(args.lambda_clean_sample).flatten(),
-                            [loss_seg_target3, loss_con_target34,
-                             loss_con_target43, loss_seg_target4],
-                        ))).sum(1)
+                    # KLDivLoss(x,y) = y * [log(y) - log(x)] = KL[y|x]
+                    kldiv_loss = torch.stack([
+                        nn.KLDivLoss(reduction='none')(lp1, p2)
+                        if e1 != e2 else
+                        nn.KLDivLoss(reduction='none')(
+                            lp1, (pslabel[:, None] == torch.arange(num_classes)[None, :, None, None].to(args.gpu)).float())
+                        for e1, lp1 in enumerate(log_prob34) for e2, p2 in enumerate(prob34)
+                    ]).reshape(2, 2, *prob34.shape[1:])
+                    loss_mat = kldiv_loss * torch.from_numpy(np.array(
+                        args.lambda_clean_sample)).float().cuda(args.gpu)[:, :, None, None, None, None]
+                    loss34 = loss_mat.sum(1).sum(2, keepdim=True)
+                    del kldiv_loss, loss_mat
+                elif 'CoTeaching' in args.clsample_policy:
+                    loss34 = torch.stack(loss_seg_target34)
+                else:
+                    raise NotImplementedError
+                # loss34
 
-                        # BxNx1
-                        thr_tb = compute_threshold_table(
-                            # Bx(WH|WxH)
-                            -loss,
-                            torch.zeros_like(loss).long(),
-                            C=1, N=clsample_thld_n, ignore_class=True,
-                        )
-                        # [BxNx1].gather(2, BxNxWH) ) -> BxNxWH
-                        # BxNxWH -> BxNx(WH|WxH)
-                        thr_output = thr_tb.gather(
-                            2,
-                            # [Bx(WH|WxH) -> Bx1xWH].repeat(1xNx1) -> BBxNxWH
-                            torch.zeros_like(
-                                loss.flatten(-2)).long().repeat(1, clsample_thld_n, 1),
-                        ).reshape(len(loss), clsample_thld_n, *loss.shape[1:])
+                if 'plus_cls' in args.clsample_policy:
+                    # for per class
+                    loss34 = loss34.repeat(1, 1, num_classes, 1, 1)
+                    mask34 = (pslabel != args.ignore_label)[None, :, None, :, :] \
+                        + (prob34.argmax(2, keepdim=True) ==
+                            torch.arange(num_classes).to(args.gpu)[None, None, :, None, None])
+                elif 'plus' in args.clsample_policy:
+                    # ignore class
+                    loss34 = loss34.squeeze(2)
+                    mask34 = (pslabel != args.ignore_label)[
+                        None, :].repeat(2, 1, 1, 1)
+                elif 'cls' in args.clsample_policy:
+                    # for per class
+                    loss34 = loss34.sum(0, keepdim=True).repeat(
+                        2, 1, num_classes, 1, 1)
+                    mask34 = (pslabel != args.ignore_label)[None, :, None, :, :] \
+                        + (prob34.argmax(2, keepdim=True) ==
+                            torch.arange(num_classes).to(args.gpu)[None, None, :, None, None])
+                else:
+                    # ignore class, ignore classifier
+                    loss34 = loss34.squeeze(2).sum(
+                        0, keepdim=True).repeat(2, 1, 1, 1)
+                    mask34 = (pslabel != args.ignore_label)[
+                        None, :].repeat(2, 1, 1, 1)
+                # mask34
 
-                        selected_sample = - \
-                            loss > thr_output[:,
-                                              thr_columns.index(clsample_thld)]
-                        selected_samples = [selected_sample]*4
+                masked_fill_loss34 = loss34.masked_fill(
+                    ~mask34, float('-inf'))
+                sorted_loss34 = masked_fill_loss34.flatten(
+                    -2).sort(-1, descending=True)[0]
+                mask_sum34 = mask34.flatten(
+                    -2).sum(-1, keepdim=True).float()
+                loss34_quantile = sorted_loss34.gather(
+                    -1, (mask_sum34*0.5).round().long())
 
-                elif args.clsample_policy == 'CoTeaching_plus_34':
-                    poten1234_mask = (pslabel != args.ignore_label)[None, :, None, :, :] \
-                        + (poten1234.argmax(2, keepdim=True) ==
-                           torch.arange(num_classes).to(args.gpu)[None, None, :, None, None])
-                    loss1234 = torch.stack(loss_seg_target1234)[
-                        :, :, None, :, :].repeat(1, 1, num_classes, 1, 1)
-                    masked_fill_loss1234 = loss1234.masked_fill(
-                        ~poten1234_mask, float('-inf'))
-                    sorted_loss1234 = masked_fill_loss1234.flatten(
-                        -2).sort(-1, descending=True)[0]
-                    sum_poten1234 = poten1234_mask.flatten(
-                        -2).sum(-1, keepdim=True)
-                    loss1234_quantile = sorted_loss1234.gather(
-                        -1, (sum_poten1234.float()*0.5).round().long())
-
-                    poten1234_thld_mask = loss1234 < loss1234_quantile.unsqueeze(
-                        -1)
-                    pred1234 = poten1234.argmax(2)
-                    pred1234_filtered = pred1234.masked_fill(
-                        poten1234_thld_mask.gather(
-                            2, pred1234.unsqueeze(2)).squeeze(2),
+                if 'cls' not in args.clsample_policy:
+                    pred34_filtered = loss34 < loss34_quantile[..., None]
+                else:
+                    loss34_thld_mask = loss34 < loss34_quantile[..., None]
+                    pred34 = prob34.argmax(2)
+                    pred34_filtered = pred34.masked_fill(
+                        loss34_thld_mask.gather(
+                            2, pred34.unsqueeze(2)).squeeze(2),
                         float(args.ignore_label))
+                    del loss34_thld_mask, pred34
 
-                    selected_sample_3, selected_sample_4 = pred1234_filtered[2:]
-                    selected_sample_3and4 = selected_sample_3.masked_fill(
-                        selected_sample_3 != selected_sample_4, float(args.ignore_label))
-                    selected_sample_for3 = (selected_sample_4 != args.ignore_label) * \
-                        (~(selected_sample_3and4 != args.ignore_label))
-                    selected_sample_for4 = (selected_sample_3 != args.ignore_label) * \
-                        (~(selected_sample_3and4 != args.ignore_label))
+                selected_sample_3, selected_sample_4 = pred34_filtered
+
+                if 'plus' in args.clsample_policy:
+                    # minus
+                    mat_selected_sample_and = torch.stack([
+                        pf1.masked_fill(
+                            pf1 != pf2, float(args.ignore_label))
+                        for e1, pf1 in enumerate(pred34_filtered)
+                        for e2, pf2 in enumerate(pred34_filtered)
+                    ]).reshape(2, 2, *pred34_filtered.shape[1:])
+                    mat_selected_sample_minus = torch.stack([
+                        pf1.masked_fill(
+                            pf1 == pf_and, float(args.ignore_label))
+                        for e1, pf1 in enumerate(pred34_filtered)
+                        for e2, pf_and in enumerate(mat_selected_sample_and[e1])
+                    ]).reshape(2, 2, *pred34_filtered.shape[1:])
+
+                    selected_sample_for3, selected_sample_for4 = \
+                        (mat_selected_sample_minus !=
+                            args.ignore_label).sum(dim=1).bool()
                     selected_samples = [
-                        torch.zeros_like(selected_sample_3).bool(),
-                        torch.zeros_like(selected_sample_3).bool(),
                         selected_sample_for3,
                         selected_sample_for4,
                     ]
+                    del mat_selected_sample_and, mat_selected_sample_minus
+                    del selected_sample_for3, selected_sample_for4
+                else:
+                    selected_samples = [
+                        selected_sample_3,
+                        selected_sample_4,
+                    ]
+
+                del output34, poten34, log_prob34, prob34
+                del loss34, mask34
+                del masked_fill_loss34, sorted_loss34, mask_sum34, loss34_quantile
+                del selected_sample_3, selected_sample_4
+
+                if 'CoTeaching' in args.clsample_policy:
+                    pass
+                    # poten1234_mask = (pslabel != args.ignore_label)[None, :, None, :, :] \
+                    #     + (poten1234.argmax(2, keepdim=True) ==
+                    #        torch.arange(num_classes).to(args.gpu)[None, None, :, None, None])
+                    # loss1234 = torch.stack(loss_seg_target1234)[
+                    #     :, :, None, :, :].repeat(1, 1, num_classes, 1, 1)
+                    # masked_fill_loss1234 = loss1234.masked_fill(
+                    #     ~poten1234_mask, float('-inf'))
+                    # sorted_loss1234 = masked_fill_loss1234.flatten(
+                    #     -2).sort(-1, descending=True)[0]
+                    # sum_poten1234 = poten1234_mask.flatten(
+                    #     -2).sum(-1, keepdim=True)
+                    # loss1234_quantile = sorted_loss1234.gather(
+                    #     -1, (sum_poten1234.float()*0.5).round().long())
+
+                    # poten1234_thld_mask = loss1234 < loss1234_quantile.unsqueeze(
+                    #     -1)
+                    # pred1234 = poten1234.argmax(2)
+                    # pred1234_filtered = pred1234.masked_fill(
+                    #     poten1234_thld_mask.gather(
+                    #         2, pred1234.unsqueeze(2)).squeeze(2),
+                    #     float(args.ignore_label))
+
+                    # selected_sample_3, selected_sample_4 = pred1234_filtered[2:]
+                    # selected_sample_3and4 = selected_sample_3.masked_fill(
+                    #     selected_sample_3 != selected_sample_4, float(args.ignore_label))
+                    # selected_sample_for3 = (selected_sample_4 != args.ignore_label) * \
+                    #     (~(selected_sample_3and4 != args.ignore_label))
+                    # selected_sample_for4 = (selected_sample_3 != args.ignore_label) * \
+                    #     (~(selected_sample_3and4 != args.ignore_label))
+                    # selected_samples = [
+                    #     torch.zeros_like(selected_sample_3).bool(),
+                    #     torch.zeros_like(selected_sample_3).bool(),
+                    #     selected_sample_for3,
+                    #     selected_sample_for4,
+                    # ]
 
             if args.is_training:
                 model.train()
@@ -678,33 +742,46 @@ def main(args):
             # 4xBxCxWxH
             poten1234 = interp_target(output1234)
             poten1234 = poten1234.reshape(4, -1, *poten1234.shape[1:])
-
             loss_seg_target1234 = list(map(
                 lambda poten: nn.CrossEntropyLoss(
                     reduction='none', ignore_index=args.ignore_label)(poten, pslabel),
-                # lambda pred_target: loss_calc(
-                #     pred_target, pslabel, args.ignore_label, args.gpu),
                 poten1234))
 
-            loss_seg_target1, loss_seg_target2, loss_seg_target3, loss_seg_target4 = torch.stack(list(map(
-                lambda l, loss, sample: l*loss[sample].mean(),
+            if 'JoCoR' in args.clsample_policy:
+                log_prob34 = F.log_softmax(poten1234[2:], dim=-3)
+                prob34 = F.softmax(poten1234[2:], dim=-3)
+                # KLDivLoss(x,y) = y * [log(y) - log(x)] = KL[y|x]
+                kldiv_loss = torch.stack([
+                    nn.KLDivLoss(reduction='none')(lp1, p2)
+                    if e1 != e2 else
+                    nn.KLDivLoss(reduction='none')(
+                        lp1, (pslabel[:, None] == torch.arange(num_classes)[None, :, None, None].to(args.gpu)).float())
+                    for e1, lp1 in enumerate(log_prob34) for e2, p2 in enumerate(prob34)
+                ]).reshape(2, 2, *prob34.shape[1:])
+                loss_mat = kldiv_loss * torch.from_numpy(np.array(
+                    args.lambda_clean_sample)).float().cuda(args.gpu)[:, :, None, None, None, None]
+                loss34 = loss_mat.sum(1).sum(2, keepdim=True)
+
+                loss_seg_target1234[:2] = loss34
+                del log_prob34, prob34, kldiv_loss, loss_mat, loss34
+
+            loss_seg_target1234 = list(map(
+                lambda a, l, s: a*l[s].mean(),
                 args.lambda_target,
                 loss_seg_target1234,
-                selected_samples,
-            )))
+                [True, True] + selected_samples,
+            ))
+            del selected_samples
 
             loss = 0
-            if not torch.isnan(loss_seg_target1):
-                loss += loss_seg_target1
-            if not torch.isnan(loss_seg_target2):
-                loss += loss_seg_target2
-            if not torch.isnan(loss_seg_target3):
-                loss += loss_seg_target3
-            if not torch.isnan(loss_seg_target4):
-                loss += loss_seg_target4
+            for l in loss_seg_target1234:
+                if not torch.isnan(l):
+                    loss += l
 
             loss = loss / args.iter_size
             loss.backward()
+
+            loss_seg_target1, loss_seg_target2, loss_seg_target3, loss_seg_target4 = loss_seg_target1234
             loss_seg_target_value1 += loss_seg_target1.detach().cpu().numpy() / \
                 args.iter_size
             loss_seg_target_value2 += loss_seg_target2.detach().cpu().numpy() / \
@@ -742,6 +819,7 @@ def main(args):
                 ))).reshape(*pred1234.shape[:-2], num_classes, num_classes).sum(2)
                 IoUs = per_class_iu_batch(hist).cpu().numpy()
                 mIoU = np.nanmean(IoUs, axis=-1)
+                del pm_poten1234, pred1234, hist
 
             print('  '.join(
                 ['iter = {:8d}/{:8d}'.format(i_iter, args.num_steps),

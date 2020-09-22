@@ -594,14 +594,14 @@ def main(args):
                     mask34 = (pslabel != args.ignore_label)[None, :, None, :, :] \
                         * (prob34.argmax(2, keepdim=True) ==
                             torch.arange(num_classes).to(args.gpu)[None, None, :, None, None])
+                    mask34 = mask34.repeat(2, 1, 1, 1)
                 else:
                     # ignore class, ignore classifier
                     loss34 = loss34.sum(
                         0, keepdim=True).repeat(2, 1, 1, 1)
                     mask34 = (pslabel != args.ignore_label)[
                         None, :].repeat(2, 1, 1, 1)
-                # mask34
-
+                # mask34: ignore False as -inf for sorting, count True for quantile
                 masked_fill_loss34 = loss34.masked_fill(
                     ~mask34, float('-inf'))
                 sorted_loss34 = masked_fill_loss34.flatten(
@@ -617,36 +617,61 @@ def main(args):
                     loss34_thld_mask = loss34 < loss34_quantile[..., None]
                     pred34 = prob34.argmax(2)
                     pred34_filtered = pred34.masked_fill(
-                        loss34_thld_mask.gather(
+                        ~loss34_thld_mask.gather(
                             2, pred34.unsqueeze(2)).squeeze(2),
                         float(args.ignore_label))
                     del loss34_thld_mask, pred34
-                # pred34_filtered
+                # pred34_filtered: small loss (True|class), large loss (False|ignore_label)
 
-                if 'plus' in args.clsample_policy:
-                    # minus
-                    mat_selected_sample_and = torch.stack([
-                        pf1.masked_fill(
-                            pf1 != pf2, float(args.ignore_label))
-                        for e1, pf1 in enumerate(pred34_filtered)
-                        for e2, pf2 in enumerate(pred34_filtered)
-                    ]).reshape(2, 2, *pred34_filtered.shape[1:])
-                    mat_selected_sample_minus = torch.stack([
-                        pf1.masked_fill(
-                            pf1 == pf_and, float(args.ignore_label))
-                        for e1, pf1 in enumerate(pred34_filtered)
-                        for e2, pf_and in enumerate(mat_selected_sample_and[e1])
-                    ]).reshape(2, 2, *pred34_filtered.shape[1:])
+                if 'plus_cls' in args.clsample_policy:
+                    pred_filtered_3and4 = pred34_filtered[0].masked_fill(
+                        pred34_filtered[0] != pred34_filtered[1],
+                        float(args.ignore_label)
+                    )
 
+                    pred_filtered_3_minus_3and4 = pred34_filtered[0].masked_fill(
+                        pred34_filtered[0] == pred_filtered_3and4,
+                        float(args.ignore_label)
+                    )
+                    pred_filtered_4_minus_3and4 = pred34_filtered[1].masked_fill(
+                        pred34_filtered[1] == pred_filtered_3and4,
+                        float(args.ignore_label)
+                    )
+
+                    selected_sample_for3 = \
+                        pred_filtered_4_minus_3and4 != float(args.ignore_label)
+                    selected_sample_for4 = \
+                        pred_filtered_3_minus_3and4 != float(args.ignore_label)
+
+                    del pred_filtered_3and4, pred_filtered_3_minus_3and4, pred_filtered_4_minus_3and4
+                elif 'plus' in args.clsample_policy:
+                    pred_filtered_3and4 = pred34_filtered[0].masked_fill(
+                        pred34_filtered[0] != pred34_filtered[1],
+                        float(False)
+                    )
+
+                    pred_filtered_3_minus_3and4 = pred34_filtered[0].masked_fill(
+                        pred34_filtered[0] == pred_filtered_3and4,
+                        float(False)
+                    )
+                    pred_filtered_4_minus_3and4 = pred34_filtered[1].masked_fill(
+                        pred34_filtered[1] == pred_filtered_3and4,
+                        float(False)
+                    )
+
+                    selected_sample_for3 = \
+                        pred_filtered_4_minus_3and4 != float(False)
+                    selected_sample_for4 = \
+                        pred_filtered_3_minus_3and4 != float(False)
+
+                    del pred_filtered_3and4, pred_filtered_3_minus_3and4, pred_filtered_4_minus_3and4
+                elif 'cls' in args.clsample_policy:
                     selected_sample_for3, selected_sample_for4 = \
-                        (mat_selected_sample_minus !=
-                            args.ignore_label).sum(dim=1).bool()
-                    del mat_selected_sample_and, mat_selected_sample_minus
+                        pred34_filtered != float(args.ignore_label)
                 else:
-                    selected_sample_for3, selected_sample_for4 = list(map(
-                        lambda pf: pf != args.ignore_label,
-                        pred34_filtered,
-                    ))
+                    selected_sample_for3, selected_sample_for4 = \
+                        pred34_filtered != float(False)
+
                 selected_samples = [
                     selected_sample_for3,
                     selected_sample_for4,

@@ -567,7 +567,7 @@ def main(args):
                     ]).reshape(2, 2, *prob34.shape[1:])
                     loss_mat = kldiv_loss * torch.from_numpy(np.array(
                         args.lambda_clean_sample)).float().cuda(args.gpu)[:, :, None, None, None, None]
-                    loss34 = loss_mat.sum(1).sum(2, keepdim=True)
+                    loss34 = loss_mat.sum(1).sum(2)
                     del kldiv_loss, loss_mat
                 elif 'CoTeaching' in args.clsample_policy:
                     loss34 = torch.stack(loss_seg_target34)
@@ -577,25 +577,25 @@ def main(args):
 
                 if 'plus_cls' in args.clsample_policy:
                     # for per class
-                    loss34 = loss34.repeat(1, 1, num_classes, 1, 1)
+                    loss34 = loss34.unsqueeze(2).repeat(
+                        1, 1, num_classes, 1, 1)
                     mask34 = (pslabel != args.ignore_label)[None, :, None, :, :] \
                         + (prob34.argmax(2, keepdim=True) ==
                             torch.arange(num_classes).to(args.gpu)[None, None, :, None, None])
                 elif 'plus' in args.clsample_policy:
                     # ignore class
-                    loss34 = loss34.squeeze(2)
                     mask34 = (pslabel != args.ignore_label)[
                         None, :].repeat(2, 1, 1, 1)
                 elif 'cls' in args.clsample_policy:
                     # for per class
-                    loss34 = loss34.sum(0, keepdim=True).repeat(
+                    loss34 = loss34.unsqueeze(2).sum(0, keepdim=True).repeat(
                         2, 1, num_classes, 1, 1)
                     mask34 = (pslabel != args.ignore_label)[None, :, None, :, :] \
                         + (prob34.argmax(2, keepdim=True) ==
                             torch.arange(num_classes).to(args.gpu)[None, None, :, None, None])
                 else:
                     # ignore class, ignore classifier
-                    loss34 = loss34.squeeze(2).sum(
+                    loss34 = loss34.sum(
                         0, keepdim=True).repeat(2, 1, 1, 1)
                     mask34 = (pslabel != args.ignore_label)[
                         None, :].repeat(2, 1, 1, 1)

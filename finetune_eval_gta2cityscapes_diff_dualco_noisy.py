@@ -722,15 +722,10 @@ def main(args):
             for name, image_col in image_cols:
                 image_col.save(osp.join(
                     save_dir, 'GTA5_'+str(args.num_steps_stop), name))
-            # dfs = eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
-            #                  testtargetloader, mapping, interp_target_gt, args.gpu_eval)
-            # if args.use_wandb:
-            #     for name_class, df in pslabel_dfs.items():
-            #         wandb.log({
-            #             'pslabel/{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
-            #             for top_p in policy_index
-            #             for filter_output in thr_columns
-            #         }, step=int(args.num_steps_stop))
+            if args.use_wandb:
+                wandb.log({'clean label': [wandb.Image(image_col, caption=name) for name, image_col in image_cols]},
+                          step=args.num_steps_stop)
+
             break
 
         if i_iter % args.save_pred_every == 0 and i_iter != 0:
@@ -743,17 +738,9 @@ def main(args):
                 save_dir, 'GTA5_' + str(i_iter) + '.pth'))
             for name, image_col in image_cols:
                 image_col.save(osp.join(save_dir, 'GTA5_'+str(i_iter), name))
-            # dfs = eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
-            #                  testtargetloader, mapping, interp_target_gt, args.gpu_eval)
-            # if args.use_wandb:
-            #     for name_class, df in pslabel_dfs.items():
-            #         wandb.log({
-            #             'eval/pslabel/{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
-            #             for top_p in policy_index
-            #             for filter_output in thr_columns
-            #         }, step=i_iter)
-            # save_target_pred_max_argmax(model, targetloader, interp_target_gt,
-            #                             osp.join(save_dir, 'GTA5_' + str(i_iter)))
+            if args.use_wandb:
+                wandb.log({'clean label': [wandb.Image(image_col, caption=name) for name, image_col in image_cols]},
+                          step=i_iter)
 
 
 if __name__ == '__main__':

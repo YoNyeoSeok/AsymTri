@@ -19,18 +19,21 @@ import random
 import json
 import pandas as pd
 from PIL import Image
-from eval_iou import (load_gt, label_mapping,
-                      compute_threshold_table,
-                      per_class_filter_two_output,
-                      compute_filtered_output_a_b_and_or,
-                      fast_hist_torch, per_class_iu_torch,
-                      fast_hist_batch, per_class_iu_batch)
 
 from model.deeplab_multi import DeeplabMulti
 from model.deeplab_dualco import DeeplabDualCo
 from utils.loss import CrossEntropy2d
 from dataset.gta5_dataset import GTA5DataSet
 from dataset.cityscapes_dataset import cityscapesDataSet
+from eval_iou import (load_gt, label_mapping,
+                      compute_threshold_table,
+                      per_class_filter_two_output,
+                      compute_filtered_output_a_b_and_or,
+                      fast_hist_torch, per_class_iu_torch,
+                      fast_hist_batch, per_class_iu_batch)
+from get_pseudo_label import get_pseudo_label
+from get_clean_label import get_clean_label
+from get_hist import get_hist
 
 import wandb
 
@@ -85,8 +88,8 @@ PSEUDO_LABEL_POLICY = 'per_class_1and2'
 
 CLEAN_SAMPLE_THRESHOLD = '10,90_100'
 CLEAN_SAMPLE_POLICY = 'JoCoR_34'
-LAMBDA_CLEAN_SAMPLE = [[1., 1.],
-                       [1., 1.], ]
+LAMBDA_CLEAN_SAMPLE = [[1., .5],
+                       [.5, 1.], ]
 LAMBDA_CLEAN_SAMPLE_REG = [[1., 1.],
                            [1., 1.], ]
 LAMBDA_CLEAN_SAMPLE_SEL = [[-1, 1],
@@ -300,7 +303,7 @@ def main(args):
     """Create the model and start the training."""
 
     if args.use_wandb:
-        wandb.init(project='AsymTri_Pipeline_Diff_DualCo_Noisy2',
+        wandb.init(project='AsymTri_Pipeline_Diff_DualCo_Noisy3',
                    name='Round1', dir='./', config=args)
 
     w, h = map(int, args.input_size.split(','))
@@ -452,6 +455,8 @@ def main(args):
         loss_seg_target_value2 = 0
         loss_seg_target_value3 = 0
         loss_seg_target_value4 = 0
+        loss_seg_target_value3_reg = 0
+        loss_seg_target_value4_reg = 0
 
         adjust_learning_rate(optimizer, i_iter)
 
@@ -501,187 +506,223 @@ def main(args):
             # print('target', torch.cuda.memory_summary())
 
             # get pseudo-label
-            prev_model.eval()
-            with torch.no_grad():
-                # 4BxCxWxH
-                pm_output1234 = torch.cat(prev_model(images))
-                # 4BxCxWxH
-                pm_poten1234 = interp_target(pm_output1234)
-                # 4xBxCxWxH
-                pm_poten1234 = pm_poten1234.reshape(
-                    4, -1, *pm_poten1234.shape[1:])
-                pm_prob1234 = F.softmax(pm_poten1234, -3)
-                # 4xBxWxH
-                pm_confid1234, pm_pred1234 = pm_prob1234.max(2)
+            pslabel = get_pseudo_label(prev_model, images, interp_target, num_classes, args.ignore_label,
+                                       policy_index.index(args.pslabel_policy), thr_columns.index(threshold))
+            if False:
+                pass
+                # prev_model.eval()
+                # with torch.no_grad():
+                #     # 4BxCxWxH
+                #     pm_output1234 = torch.cat(prev_model(images))
+                #     # 4BxCxWxH
+                #     pm_poten1234 = interp_target(pm_output1234)
+                #     # 4xBxCxWxH
+                #     pm_poten1234 = pm_poten1234.reshape(
+                #         4, -1, *pm_poten1234.shape[1:])
+                #     pm_prob1234 = F.softmax(pm_poten1234, -3)
+                #     # 4xBxWxH
+                #     pm_confid1234, pm_pred1234 = pm_prob1234.max(2)
 
-                # 16xNxBxWxH
-                filtered_pm_pred_1_2_1and2_1or2_3_4_3and4_3or4 = torch.cat(list(map(
-                    lambda max_output_ab, argmax_output_ab:
-                        # 8xNxBxWxH
-                        torch.cat(list(map(
-                            # 4xNxBxWxH
-                            lambda igc: compute_filtered_output_a_b_and_or(
-                                max_output_ab, argmax_output_ab,
-                                ignore_label=args.ignore_label, C=num_classes, N=10, ignore_class=igc),
-                            [True, False]
-                        ))),
-                    pm_confid1234.split(2), pm_pred1234.split(2)
-                )))
-                # pslabel = pm_pred (prev model filtered pred)
-                pslabel = filtered_pm_pred_1_2_1and2_1or2_3_4_3and4_3or4[
-                    policy_index.index(args.pslabel_policy),
-                    thr_columns.index(threshold)]
-                del pm_poten1234, pm_prob1234, pm_confid1234, pm_pred1234
-                del filtered_pm_pred_1_2_1and2_1or2_3_4_3and4_3or4
-            # print('get pseudo-label', torch.cuda.memory_summary())
+                #     # 16xNxBxWxH
+                #     filtered_pm_pred_1_2_1and2_1or2_3_4_3and4_3or4 = torch.cat(list(map(
+                #         lambda max_output_ab, argmax_output_ab:
+                #             # 8xNxBxWxH
+                #             torch.cat(list(map(
+                #                 # 4xNxBxWxH
+                #                 lambda igc: compute_filtered_output_a_b_and_or(
+                #                     max_output_ab, argmax_output_ab,
+                #                     ignore_label=args.ignore_label, C=num_classes, N=10, ignore_class=igc),
+                #                 [True, False]
+                #             ))),
+                #         pm_confid1234.split(2), pm_pred1234.split(2)
+                #     )))
+                #     # pslabel = pm_pred (prev model filtered pred)
+                #     pslabel = filtered_pm_pred_1_2_1and2_1or2_3_4_3and4_3or4[
+                #         policy_index.index(args.pslabel_policy),
+                #         thr_columns.index(threshold)]
+                #     del pm_poten1234, pm_prob1234, pm_confid1234, pm_pred1234
+                #     del filtered_pm_pred_1_2_1and2_1or2_3_4_3and4_3or4
+                # # print('get pseudo-label', torch.cuda.memory_summary())
 
             images = images.cuda(args.gpu)
             pslabel = pslabel.cuda(args.gpu)
             # get clean label from pseudo-label
-            model.eval()
-            with torch.no_grad():
-                output34 = torch.cat(model(images))[2:]
-                # 4xBxCxWxH
-                poten34 = interp_target(output34)
-                poten34 = poten34.reshape(2, -1, *poten34.shape[1:])
-                log_prob34 = F.log_softmax(poten34, dim=-3)
-                prob34 = F.softmax(poten34, dim=-3)
+            selected_samples, image_cols = get_clean_label(
+                model, images, pslabel, interp_target, num_classes, args.ignore_label, args.clsample_policy, args.lambda_clean_sample, args.gpu)
+            if False:
+                pass
+                # model.eval()
+                # with torch.no_grad():
+                #     output34 = torch.cat(model(images))[2:]
+                #     # 4xBxCxWxH
+                #     poten34 = interp_target(output34)
+                #     poten34 = poten34.reshape(2, -1, *poten34.shape[1:])
+                #     log_prob34 = F.log_softmax(poten34, dim=-3)
+                #     prob34 = F.softmax(poten34, dim=-3)
+                #     for output, output_name in zip([pslabel]+[*prob34.argmax(dim=2)], ['pslabel', 'pred3', 'pred4']):
+                #         col = to_pil_image(output.cpu().int()).convert('P')
+                #         col.putpalette(palette)
+                #         col.save('test_noisy/{}_color.png'.format(output_name))
 
-                if 'JoCoR' in args.clsample_policy:
-                    onehot_pslabel = pslabel[:, None] == torch.arange(
-                        num_classes)[None, :, None, None].to(args.gpu)
-                    # KLDivLoss(x,y) = y * [log(y) - log(x)] = KL[y|x]
-                    kldiv_loss = torch.stack([
-                        nn.KLDivLoss(reduction='none')(lp1, p2)
-                        if e1 != e2 else
-                        nn.KLDivLoss(reduction='none')(
-                            lp1, onehot_pslabel.float())
-                        for e1, lp1 in enumerate(log_prob34)
-                        for e2, p2 in enumerate(prob34)
-                    ]).reshape(2, 2, *prob34.shape[1:]).sum(3)
-                    loss_mat = kldiv_loss * torch.from_numpy(np.array(
-                        args.lambda_clean_sample))[:, :, None, None, None].cuda(args.gpu).float()
-                    loss34 = loss_mat.sum(1)
-                    del kldiv_loss, loss_mat
-                elif 'CoTeaching' in args.clsample_policy:
-                    loss_seg_target34 = list(map(
-                        lambda poten: nn.CrossEntropyLoss(
-                            reduction='none', ignore_index=args.ignore_label)(poten, pslabel),
-                        # lambda pred_target: loss_calc(
-                        #     pred_target, pslabel, args.ignore_label, args.gpu),
-                        poten34))
+                #     if 'JoCoR' in args.clsample_policy:
+                #         onehot_pslabel = pslabel[:, None] == torch.arange(
+                #             num_classes)[None, :, None, None].to(args.gpu)
+                #         # KLDivLoss(x,y) = y * [log(y) - log(x)] = KL[y|x]
+                #         kldiv_loss = torch.stack([
+                #             nn.KLDivLoss(reduction='none')(lp1, p2)
+                #             if e1 != e2 else
+                #             nn.KLDivLoss(reduction='none')(
+                #                 lp1, onehot_pslabel.float())
+                #             for e1, lp1 in enumerate(log_prob34)
+                #             for e2, p2 in enumerate(prob34)
+                #         ]).reshape(2, 2, *prob34.shape[1:]).sum(3)
+                #         loss_mat = kldiv_loss * torch.from_numpy(np.array(
+                #             args.lambda_clean_sample))[:, :, None, None, None].cuda(args.gpu).float()
+                #         loss34 = loss_mat.sum(1)
+                #         del kldiv_loss, loss_mat
+                #     elif 'CoTeaching' in args.clsample_policy:
+                #         loss_seg_target34 = list(map(
+                #             lambda poten: nn.CrossEntropyLoss(
+                #                 reduction='none', ignore_index=args.ignore_label)(poten, pslabel),
+                #             # lambda pred_target: loss_calc(
+                #             #     pred_target, pslabel, args.ignore_label, args.gpu),
+                #             poten34))
 
-                    loss34 = torch.stack(loss_seg_target34)
-                else:
-                    raise NotImplementedError
-                # loss34
+                #         loss34 = torch.stack(loss_seg_target34)
+                #     else:
+                #         raise NotImplementedError
+                #     # loss34
+                #     for output, output_name in zip(loss34.cpu(), ['loss3', 'loss4']):
+                #         output -= output.min()
+                #         output /= output.max()
+                #         output *= 255
+                #         gray = to_pil_image(output.int()).convert('L')
+                #         gray.save('test_noisy/{}_gray.png'.format(output_name))
 
-                if 'plus_cls' in args.clsample_policy:
-                    # for per class
-                    loss34 = loss34.unsqueeze(2).repeat(
-                        1, 1, num_classes, 1, 1)
-                    mask34 = (pslabel != args.ignore_label)[None, :, None, :, :] \
-                        * (prob34.argmax(2, keepdim=True) ==
-                            torch.arange(num_classes).to(args.gpu)[None, None, :, None, None])
-                elif 'plus' in args.clsample_policy:
-                    # ignore class
-                    mask34 = (pslabel != args.ignore_label)[
-                        None, :].repeat(2, 1, 1, 1)
-                elif 'cls' in args.clsample_policy:
-                    # for per class
-                    loss34 = loss34.unsqueeze(2).sum(0, keepdim=True).repeat(
-                        2, 1, num_classes, 1, 1)
-                    mask34 = (pslabel != args.ignore_label)[None, :, None, :, :] \
-                        * (prob34.argmax(2, keepdim=True) ==
-                            torch.arange(num_classes).to(args.gpu)[None, None, :, None, None])
-                    mask34 = mask34.repeat(2, 1, 1, 1)
-                else:
-                    # ignore class, ignore classifier
-                    loss34 = loss34.sum(
-                        0, keepdim=True).repeat(2, 1, 1, 1)
-                    mask34 = (pslabel != args.ignore_label)[
-                        None, :].repeat(2, 1, 1, 1)
-                # mask34: ignore False as -inf for sorting, count True for quantile
-                masked_fill_loss34 = loss34.masked_fill(
-                    ~mask34, float('-inf'))
-                sorted_loss34 = masked_fill_loss34.flatten(
-                    -2).sort(-1, descending=True)[0]
-                mask_sum34 = mask34.flatten(
-                    -2).sum(-1, keepdim=True).float()
-                loss34_quantile = sorted_loss34.gather(
-                    -1, (mask_sum34*0.5).round().long())
+                #     if 'plus_cls' in args.clsample_policy:
+                #         # for per class
+                #         loss34 = loss34.unsqueeze(2).repeat(
+                #             1, 1, num_classes, 1, 1)
+                #         mask34 = (pslabel != args.ignore_label)[None, :, None, :, :] \
+                #             * (prob34.argmax(2, keepdim=True) ==
+                #                 torch.arange(num_classes).to(args.gpu)[None, None, :, None, None])
+                #     elif 'plus' in args.clsample_policy:
+                #         # ignore class
+                #         mask34 = (pslabel != args.ignore_label)[
+                #             None, :].repeat(2, 1, 1, 1)
+                #     elif 'cls' in args.clsample_policy:
+                #         # for per class
+                #         loss34 = loss34.unsqueeze(2).sum(0, keepdim=True).repeat(
+                #             2, 1, num_classes, 1, 1)
+                #         mask34 = (pslabel != args.ignore_label)[None, :, None, :, :] \
+                #             * (prob34.argmax(2, keepdim=True) ==
+                #                 torch.arange(num_classes).to(args.gpu)[None, None, :, None, None])
+                #         mask34 = mask34.repeat(2, 1, 1, 1)
+                #     else:
+                #         # ignore class, ignore classifier
+                #         loss34 = loss34.sum(
+                #             0, keepdim=True).repeat(2, 1, 1, 1)
+                #         mask34 = (pslabel != args.ignore_label)[
+                #             None, :].repeat(2, 1, 1, 1)
+                #     # mask34: ignore False as -inf for sorting, count True for quantile
+                #     for output, m, output_name in zip(prob34.argmax(dim=2).cpu(), mask34.sum(2).bool().cpu(), ['pred3', 'pred4']):
+                #         output.masked_fill_(~m, float(args.ignore_label))
+                #         col = to_pil_image(output.int()).convert('P')
+                #         col.putpalette(palette)
+                #         col.save('test_noisy/masked_{}.png'.format(output_name))
 
-                if 'cls' not in args.clsample_policy:
-                    pred34_filtered = loss34 < loss34_quantile[..., None]
-                else:
-                    loss34_thld_mask = loss34 < loss34_quantile[..., None]
-                    pred34 = prob34.argmax(2)
-                    pred34_filtered = pred34.masked_fill(
-                        ~loss34_thld_mask.gather(
-                            2, pred34.unsqueeze(2)).squeeze(2),
-                        float(args.ignore_label))
-                    del loss34_thld_mask, pred34
-                # pred34_filtered: small loss (True|class), large loss (False|ignore_label)
+                #     masked_fill_loss34 = loss34.masked_fill(
+                #         ~mask34, float('inf'))
+                #     sorted_loss34 = masked_fill_loss34.flatten(
+                #         -2).sort(-1)[0]
+                #     mask_sum34 = mask34.flatten(
+                #         -2).sum(-1, keepdim=True).float()
+                #     loss34_quantile = sorted_loss34.gather(
+                #         -1, (mask_sum34*0.5).round().long())
 
-                if 'plus_cls' in args.clsample_policy:
-                    pred_filtered_3and4 = pred34_filtered[0].masked_fill(
-                        pred34_filtered[0] != pred34_filtered[1],
-                        float(args.ignore_label)
-                    )
+                #     if 'cls' not in args.clsample_policy:
+                #         pred34_filtered = masked_fill_loss34 < loss34_quantile[..., None]
+                #     else:
+                #         loss34_thld_mask = masked_fill_loss34 < loss34_quantile[..., None]
+                #         pred34 = prob34.argmax(2)
+                #         pred34_filtered = pred34.masked_fill(
+                #             ~loss34_thld_mask.gather(
+                #                 2, pred34.unsqueeze(2)).squeeze(2),
+                #             float(args.ignore_label))
+                #         del loss34_thld_mask, pred34
+                #     # pred34_filtered: small loss (True|class), large loss (False|ignore_label)
+                #     for output, output_name in zip(pred34_filtered.squeeze(2).cpu(), ['pred3', 'pred4']):
+                #         col = to_pil_image(output.int()).convert('P')
+                #         if output.dtype == torch.int64:
+                #             col.putpalette(palette)
+                #         else:
+                #             col = col.convert('1')
+                #         col.save(
+                #             'test_noisy/masked_filtered_{}.png'.format(output_name))
 
-                    pred_filtered_3_minus_3and4 = pred34_filtered[0].masked_fill(
-                        pred34_filtered[0] == pred_filtered_3and4,
-                        float(args.ignore_label)
-                    )
-                    pred_filtered_4_minus_3and4 = pred34_filtered[1].masked_fill(
-                        pred34_filtered[1] == pred_filtered_3and4,
-                        float(args.ignore_label)
-                    )
+                #     if 'plus_cls' in args.clsample_policy:
+                #         pred_filtered_3and4 = pred34_filtered[0].masked_fill(
+                #             pred34_filtered[0] != pred34_filtered[1],
+                #             float(args.ignore_label)
+                #         )
 
-                    selected_sample_for3 = \
-                        pred_filtered_4_minus_3and4 != float(args.ignore_label)
-                    selected_sample_for4 = \
-                        pred_filtered_3_minus_3and4 != float(args.ignore_label)
+                #         pred_filtered_3_minus_3and4 = pred34_filtered[0].masked_fill(
+                #             pred34_filtered[0] == pred_filtered_3and4,
+                #             float(args.ignore_label)
+                #         )
+                #         pred_filtered_4_minus_3and4 = pred34_filtered[1].masked_fill(
+                #             pred34_filtered[1] == pred_filtered_3and4,
+                #             float(args.ignore_label)
+                #         )
 
-                    del pred_filtered_3and4, pred_filtered_3_minus_3and4, pred_filtered_4_minus_3and4
-                elif 'plus' in args.clsample_policy:
-                    pred_filtered_3and4 = pred34_filtered[0].masked_fill(
-                        pred34_filtered[0] != pred34_filtered[1],
-                        float(False)
-                    )
+                #         selected_sample_for3 = \
+                #             pred_filtered_4_minus_3and4 != float(args.ignore_label)
+                #         selected_sample_for4 = \
+                #             pred_filtered_3_minus_3and4 != float(args.ignore_label)
 
-                    pred_filtered_3_minus_3and4 = pred34_filtered[0].masked_fill(
-                        pred34_filtered[0] == pred_filtered_3and4,
-                        float(False)
-                    )
-                    pred_filtered_4_minus_3and4 = pred34_filtered[1].masked_fill(
-                        pred34_filtered[1] == pred_filtered_3and4,
-                        float(False)
-                    )
+                #         del pred_filtered_3and4, pred_filtered_3_minus_3and4, pred_filtered_4_minus_3and4
+                #     elif 'plus' in args.clsample_policy:
+                #         pred_filtered_3and4 = pred34_filtered[0].masked_fill(
+                #             pred34_filtered[0] != pred34_filtered[1],
+                #             float(False)
+                #         )
 
-                    selected_sample_for3 = \
-                        pred_filtered_4_minus_3and4 != float(False)
-                    selected_sample_for4 = \
-                        pred_filtered_3_minus_3and4 != float(False)
+                #         pred_filtered_3_minus_3and4 = pred34_filtered[0].masked_fill(
+                #             pred34_filtered[0] == pred_filtered_3and4,
+                #             float(False)
+                #         )
+                #         pred_filtered_4_minus_3and4 = pred34_filtered[1].masked_fill(
+                #             pred34_filtered[1] == pred_filtered_3and4,
+                #             float(False)
+                #         )
 
-                    del pred_filtered_3and4, pred_filtered_3_minus_3and4, pred_filtered_4_minus_3and4
-                elif 'cls' in args.clsample_policy:
-                    selected_sample_for3, selected_sample_for4 = \
-                        pred34_filtered != float(args.ignore_label)
-                else:
-                    selected_sample_for3, selected_sample_for4 = \
-                        pred34_filtered != float(False)
+                #         selected_sample_for3 = \
+                #             pred_filtered_4_minus_3and4 != float(False)
+                #         selected_sample_for4 = \
+                #             pred_filtered_3_minus_3and4 != float(False)
 
-                selected_samples = [
-                    selected_sample_for3,
-                    selected_sample_for4,
-                ]
+                #         del pred_filtered_3and4, pred_filtered_3_minus_3and4, pred_filtered_4_minus_3and4
+                #     elif 'cls' in args.clsample_policy:
+                #         selected_sample_for3, selected_sample_for4 = \
+                #             pred34_filtered != float(args.ignore_label)
+                #     else:
+                #         selected_sample_for3, selected_sample_for4 = \
+                #             pred34_filtered != float(False)
+                #     selected_samples = [
+                #         selected_sample_for3,
+                #         selected_sample_for4,
+                #     ]
+                #     for output, m, output_name in zip(prob34.argmax(dim=2).cpu(), selected_samples, ['pred3', 'pred4']):
+                #         output.masked_fill_(~m.cpu(), float(args.ignore_label))
+                #         col = to_pil_image(output.int()).convert('P')
+                #         col.putpalette(palette)
+                #         col.save('test_noisy/selected_{}.png'.format(output_name))
 
-                del output34, poten34, log_prob34, prob34
-                del loss34, mask34
-                del masked_fill_loss34, sorted_loss34, mask_sum34, loss34_quantile
-                del pred34_filtered
-            # print('get clean-label', torch.cuda.memory_summary())
+                #     del output34, poten34, log_prob34, prob34
+                #     del loss34, mask34
+                #     del masked_fill_loss34, sorted_loss34, mask_sum34, loss34_quantile
+                #     del pred34_filtered
+                # # print('get clean-label', torch.cuda.memory_summary())
 
             # train with clean label
             if args.is_training:
@@ -711,6 +752,8 @@ def main(args):
                 ]).reshape(2, 2, *prob34.shape[1:])
                 loss_mat = kldiv_loss * torch.from_numpy(np.array(
                     args.lambda_clean_sample)).float().cuda(args.gpu)[:, :, None, None, None, None]
+                loss_seg_target3_reg = loss_mat[0, 1].sum(1)
+                loss_seg_target4_reg = loss_mat[1, 0].sum(1)
                 loss34 = loss_mat.sum(1).sum(2)
 
                 loss_seg_target1234[2:] = loss34
@@ -723,6 +766,10 @@ def main(args):
                 loss_seg_target1234,
                 [True, True] + selected_samples,
             ))
+            loss_seg_target3_reg = args.lambda_target[2] * \
+                loss_seg_target3_reg[selected_samples[0]].mean()
+            loss_seg_target4_reg = args.lambda_target[3] * \
+                loss_seg_target4_reg[selected_samples[1]].mean()
             del selected_samples
 
             loss = 0
@@ -742,22 +789,28 @@ def main(args):
                 args.iter_size
             loss_seg_target_value4 += loss_seg_target4.detach().cpu().numpy() / \
                 args.iter_size
+            if 'JoCoR' in args.clsample_policy:
+                loss_seg_target_value3_reg += loss_seg_target3_reg.detach().cpu().numpy() / \
+                    args.iter_size
+                loss_seg_target_value4_reg += loss_seg_target4_reg.detach().cpu().numpy() / \
+                    args.iter_size
 
             optimizer.step()
 
             # train metric
             gt_labelIds = load_gt(name, args.gt_dir_target,
-                                  'train').cuda(args.gpu_eval)
+                                  'train').cuda(args.gpu)
             gt_trainIds = label_mapping(gt_labelIds, mapping)
 
             with torch.no_grad():
+                output1234 = torch.cat(model(images))
                 # 4BxCxWxH
-                pm_poten1234 = interp_target_gt(pm_output1234)
+                poten1234 = interp_target_gt(output1234)
                 # 4xBxCxWxH
-                pm_poten1234 = pm_poten1234.reshape(
-                    4, -1, *pm_poten1234.shape[1:])
+                poten1234 = poten1234.reshape(
+                    4, -1, *poten1234.shape[1:])
                 # 4xBxWxH
-                pred1234 = pm_poten1234.argmax(2)
+                pred1234 = poten1234.argmax(2)
 
                 # hist = fast_hist_batch(
                 #     gt_trainIds.flatten(-2), argmax_output1234.flatten(-2), num_classes)
@@ -771,7 +824,7 @@ def main(args):
                 ))).reshape(*pred1234.shape[:-2], num_classes, num_classes).sum(2)
                 IoUs = per_class_iu_batch(hist).cpu().numpy()
                 mIoU = np.nanmean(IoUs, axis=-1)
-                del pm_poten1234, pred1234, hist
+                del output1234, poten1234, pred1234, hist
 
             print('  '.join(
                 ['iter = {:8d}/{:8d}'.format(i_iter, args.num_steps),
@@ -789,7 +842,13 @@ def main(args):
                  'train/loss_seg_target4 = {:.3f}'.format(
                      loss_seg_target_value4),
                  '\n',
-                 ] + ['train/mIoU_target{:d} = {:.3f}'.format(i+1, m) for i, m in enumerate(mIoU)]
+                 ] + [] if 'JoCoR' not in args.clsample_policy else [
+                    'train/loss_seg_target3_reg = {:.3f}'.format(
+                        loss_seg_target_value3_reg),
+                    'train/loss_seg_target4_reg = {:.3f}'.format(
+                        loss_seg_target_value4_reg),
+                ] + ['train/mIoU_target{:d} = {:.3f}'.format(i+1, m) for i, m in enumerate(mIoU)
+                     ]
             ))
             if args.use_wandb:
                 wandb.log({
@@ -805,6 +864,11 @@ def main(args):
                     'train/mIoU_target3': mIoU[2],
                     'train/mIoU_target4': mIoU[3],
                 }, step=i_iter)
+                if 'JoCoR' in args.clsample_policy:
+                    wandb.log({
+                        'train/loss_seg_target3_reg': loss_seg_target_value3,
+                        'train/loss_seg_target4_reg': loss_seg_target_value4,
+                    }, step=i_iter)
                 # wandb.log({
                 #     'train/{}/IoU_target{}'.format(k, i+1): IoUs[i, idx] for idx, k in enumerate(name_classes) for i in range(4)
                 # }, step=i_iter)
@@ -813,16 +877,17 @@ def main(args):
             if (i_iter-1) % len(testtargetloader) == 0:
                 testtargetloader_iter = iter(testtargetloader)
             batch = next(testtargetloader_iter)
-
-            # try:
-            #     _, batch = next(testtargetloader_iter)
-            # except StopIteration:
-            #     testtargetloader_iter = iter(testtargetloader)
-            #     _, batch = next(testtargetloader_iter)
+            images, _, name = batch
+            images = images.cuda(args.gpu_eval)
+            gt_labelIds = load_gt(name, args.gt_dir_target,
+                                  'val').cuda(args.gpu_eval)
+            gt_trainIds = label_mapping(gt_labelIds, mapping)
 
             with torch.no_grad():
-                eval_hist[(i_iter-1) % len(testtargetloader)] = eval_batch(
-                    model, num_classes, batch, mapping, interp_target_gt, args.gpu_eval)
+                # eval_hist[(i_iter-1) % len(testtargetloader)] = eval_batch(
+                #     model, num_classes, batch, mapping, interp_target_gt, args.gpu_eval)
+                eval_hist[(i_iter-1) % len(testtargetloader)] = get_hist(
+                    model, images, gt_trainIds, interp_target_gt, num_classes, args.ignore_label, args.gpu_eval)
             IoUs = per_class_iu_batch(
                 eval_hist[:i_iter].sum(0)).cpu().numpy()
             mIoU = np.nanmean(IoUs, -1)
@@ -847,7 +912,8 @@ def main(args):
                  ]
             ))
             if args.use_wandb:
-                for name_class, df in dfs.items():
+                # dfs.items():
+                for name_class, df in zip(['mIoU'], [dfs['mIoU']]):
                     wandb.log({
                         'eval/{}_{}_{}'.format(top_p, filter_output, name_class): df.loc[top_p, filter_output]
                         for top_p in policy_index
@@ -862,6 +928,9 @@ def main(args):
                     save_dir, 'GTA5_' + str(args.num_steps_stop)))
             torch.save(model.state_dict(), osp.join(
                 save_dir, 'GTA5_' + str(args.num_steps_stop) + '.pth'))
+            for name, image_col in image_cols:
+                image_col.save(osp.join(
+                    save_dir, 'GTA5_'+str(args.num_steps_stop), name))
             # dfs = eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
             #                  testtargetloader, mapping, interp_target_gt, args.gpu_eval)
             # if args.use_wandb:
@@ -878,9 +947,11 @@ def main(args):
             save_dir = args.snapshot_dir if not args.use_wandb else wandb.run.dir
             if not os.path.exists(osp.join(save_dir, 'GTA5_' + str(i_iter))):
                 os.makedirs(osp.join(save_dir, 'GTA5_' + str(i_iter)))
+
             torch.save(model.state_dict(), osp.join(
                 save_dir, 'GTA5_' + str(i_iter) + '.pth'))
-
+            for name, image_col in image_cols:
+                image_col.save(osp.join(save_dir, 'GTA5_'+str(i_iter), name))
             # dfs = eval_model(model, policy_index, thr_columns, threshold, num_classes, name_classes,
             #                  testtargetloader, mapping, interp_target_gt, args.gpu_eval)
             # if args.use_wandb:
